@@ -116,6 +116,18 @@ PROMPT_TEMPLATES = {
             'The response should be start with "Considering the user\'s recent purchase of [Item Name], ..."',
     },
 
+    'seq_rec_with_recommendation': {
+    'head': 'Analyze in depth and finally recommend next beauty product I might purchase inside <answer> and </answer>.\n' +\
+            'For example, <answer>a product</answer>.\n\n' +\
+            'Below is my historical product purchases:\n',
+    'tail': "",
+    },
+
+    'item_summary': {
+        'head': 'Summarize key attributes of the following beauty product inside <answer> and </answer>.\n\n',
+        'tail': '',
+    },
+
     'preference': {
         'head': '# User Purchase History',
         'tail': '# Task\nBased on this user\'s purchase history, describe user\'s preference:',
