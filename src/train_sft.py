@@ -43,7 +43,11 @@ from evaluator import RecommendationEvaluator
 
 # off warning messages
 import warnings
-warnings.filterwarnings("ignore") 
+warnings.filterwarnings("ignore")
+
+# AddedToken("<unusedXXXX>", ...) 대량 출력 억제
+import logging
+logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
 def generate_target_text_from_metadata(target_dict, item_metadata, use_brand=True, use_category=True):
     """
@@ -67,7 +71,7 @@ def generate_target_text_from_metadata(target_dict, item_metadata, use_brand=Tru
         
         title = item_info.get('title', '')
         # limit title length to 64 words
-        title = " ".join(title.split()[:64])
+        title = " ".join(title.split()[:32])
         text_parts.append(title)
         
         if use_brand:
@@ -153,6 +157,57 @@ def load_target_text_from_file(args, split="train"):
     return target_text_dict
 
 
+def load_target_text_from_key_selection_csv(
+    csv_path: str,
+    max_rank_threshold: int = None,
+) -> dict:
+    """
+    eval_key_selection.py 가 생성한 ranked CSV에서 SFT 타겟 텍스트 로드.
+
+    CSV 컬럼: user_id, generated_text, rank, sample_idx, ...
+    유저당 여러 샘플이 있을 경우 rank 가 가장 낮은(좋은) 샘플 1개를 선택.
+
+    Returns:
+        {user_id (int): generated_text (str)}
+    """
+    print(f"\n📄 Loading key-selection results from: {csv_path}")
+    df = pd.read_csv(csv_path)
+
+    required = {"user_id", "generated_text", "rank"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}. Found: {df.columns.tolist()}")
+
+    print(f"✓ Loaded {len(df)} rows  (users: {df['user_id'].nunique()})")
+
+    original_count = len(df)
+    if max_rank_threshold is not None:
+        df = df[df["rank"] <= max_rank_threshold]
+        print(f"  Filtered rank <= {max_rank_threshold}: {original_count} → {len(df)} rows")
+
+    # 유저당 rank 최소 샘플 선택
+    df = df.sort_values("rank").groupby("user_id", as_index=False).first()
+
+    target_text_dict = {
+        int(row["user_id"]): str(row["generated_text"])
+        for _, row in df.iterrows()
+        if pd.notna(row["generated_text"])
+    }
+    print(f"✓ Prepared target text for {len(target_text_dict)} users")
+    print(f"  Rank  mean={df['rank'].mean():.1f}  median={df['rank'].median():.0f}")
+    for k in [5, 10, 20]:
+        col = f"hit@{k}"
+        if col in df.columns:
+            print(f"  Hit@{k}: {df[col].mean():.4f}")
+
+    if target_text_dict:
+        sample_uid  = next(iter(target_text_dict))
+        sample_text = target_text_dict[sample_uid]
+        print(f"\n📝 Sample (user {sample_uid}):\n  {sample_text[:200]}")
+
+    return target_text_dict
+
+
 def load_target_text_from_rejection_sampling_csv(
     csv_path: str,
     max_rank_threshold: int = None,
@@ -233,35 +288,59 @@ def load_target_text_from_rejection_sampling_csv(
     return target_text_dict
 
 
-def prepare_sft_dataset(dataset, target_text_dict):
+def truncate_to_max_tokens(text: str, tokenizer, max_tokens: int) -> str:
+    """
+    텍스트를 max_tokens 이하의 토큰 수로 잘라 반환.
+    tokenizer가 None이거나 max_tokens가 None이면 원문 그대로 반환.
+    """
+    if tokenizer is None or max_tokens is None:
+        return text
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    if len(token_ids) <= max_tokens:
+        return text
+    truncated_ids = token_ids[:max_tokens]
+    return tokenizer.decode(truncated_ids, skip_special_tokens=False)
+
+
+def prepare_sft_dataset(dataset, target_text_dict, tokenizer=None, max_new_tokens=None):
     """
     SFT를 위한 데이터셋 준비
     
     Args:
         dataset: RecommendationDataset 인스턴스
         target_text_dict: {user_id: target_text} 딕셔너리
+        tokenizer: 토크나이저 (completion 길이 제한에 사용, None이면 제한 없음)
+        max_new_tokens: completion 최대 토큰 수 (None이면 제한 없음)
     
     Returns:
         Dataset: HuggingFace Dataset (prompt, completion 컬럼 포함)
     """
     prompts = []
     completions = []
-    
+    truncated_count = 0
+
     for i in range(len(dataset)):
         data = dataset[i]
         user_id = data['user_id']
         prompt = data['prompt']
         
-        # 타겟 텍스트 가져오기
         target_text = target_text_dict.get(user_id, "")
-        
         if not target_text:
-            # 타겟 텍스트가 없는 경우 스킵
             continue
-        
+
+        # max_new_tokens 기준으로 completion 토큰 수 제한
+        if max_new_tokens is not None and tokenizer is not None:
+            original_len = len(tokenizer.encode(target_text, add_special_tokens=False))
+            target_text = truncate_to_max_tokens(target_text, tokenizer, max_new_tokens)
+            if len(tokenizer.encode(target_text, add_special_tokens=False)) < original_len:
+                truncated_count += 1
+
         prompts.append(prompt)
         completions.append(target_text)
-    
+
+    if max_new_tokens is not None:
+        print(f"  Completion truncated (>{max_new_tokens} tokens): {truncated_count}/{len(prompts)} samples")
+
     # 샘플 출력
     print("\n" + "="*80)
     print("📝 Sample Data:")
@@ -332,8 +411,7 @@ def get_last_item_text(dataset, item_metadata, use_brand=True, use_category=True
             
             text_parts = []
             title = item_info.get('title', '')
-            # limit title length to 64 words
-            title = " ".join(title.split()[:64])
+            title = " ".join(title.split()[:16])
             text_parts.append(f"Last Item: {title}")
             
             if use_brand:
@@ -463,7 +541,6 @@ def parse_arguments():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--max_steps", type=int, default=5000)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
-    parser.add_argument("--bf16", action="store_true", help="Use bfloat16")
     
     # Token settings
     parser.add_argument("--max_length", type=int, default=1024*2,
@@ -475,8 +552,8 @@ def parse_arguments():
 
     # Target settings
     parser.add_argument("--target_type", type=str, default="from_file",
-                        choices=["from_file", "item_metadata", "rejection_sampling"],
-                        help="Target text generation method: from_file (기존 파일에서 로드), item_metadata (아이템 메타데이터 사용), rejection_sampling (rejection sampling CSV 사용)")
+                        choices=["from_file", "item_metadata", "rejection_sampling", "key_selection"],
+                        help="Target text generation method: from_file, item_metadata, rejection_sampling, key_selection (eval_key_selection.py 결과 CSV)")
     parser.add_argument("--target", type=str, default="user_preference_reasoning",
                         help="Target type name (when using from_file)")
     parser.add_argument("--target_model_name", type=str, default="gemma-3-12b-it",
@@ -489,6 +566,8 @@ def parse_arguments():
     # Rejection Sampling settings
     parser.add_argument("--rejection_sampling_csv", type=str, default=None,
                         help="Path to rejection sampling CSV file (when using target_type=rejection_sampling)")
+    parser.add_argument("--key_selection_csv", type=str, default=None,
+                        help="Path to eval_key_selection.py output ranked CSV (when using target_type=key_selection)")
     parser.add_argument("--max_rank_threshold", type=int, default=None,
                         help="Maximum rank threshold - only use samples with current_rank <= this value")
     parser.add_argument("--min_rank_improvement", type=float, default=None,
@@ -686,7 +765,6 @@ def main():
         )
         
         # Valid set은 rejection sampling을 사용하지 않고 기본 방식 사용
-        # (또는 별도의 validation CSV 지정 가능하도록 확장 가능)
         print("\n  For validation set, using item metadata")
         valid_target_dict = generate_target_text_from_metadata(
             valid_dataset.target_dict,
@@ -696,6 +774,28 @@ def main():
         )
         valid_target_text_dict = {user_id: valid_target_dict[i] 
                                   for i, user_id in enumerate(sorted(valid_dataset.target_dict.keys()))}
+
+    elif args.target_type == "key_selection":
+        # 옵션 4: eval_key_selection.py 로 생성된 ranked CSV에서 로드
+        if args.key_selection_csv is None:
+            raise ValueError("--key_selection_csv must be specified when using target_type=key_selection")
+
+        print(f"  Loading target text from key-selection ranked CSV")
+        train_target_text_dict = load_target_text_from_key_selection_csv(
+            csv_path=args.key_selection_csv,
+            max_rank_threshold=args.max_rank_threshold,
+        )
+
+        # Valid set은 item metadata 기본 방식 사용
+        print("\n  For validation set, using item metadata")
+        valid_target_dict = generate_target_text_from_metadata(
+            valid_dataset.target_dict,
+            item_metadata,
+            use_brand=args.use_brand,
+            use_category=args.use_category,
+        )
+        valid_target_text_dict = {user_id: valid_target_dict[i]
+                                  for i, user_id in enumerate(sorted(valid_dataset.target_dict.keys()))}
     
     else:
         raise ValueError(f"Unknown target_type: {args.target_type}")
@@ -703,8 +803,17 @@ def main():
     # SFT 데이터셋 준비
     print(f"\n📦 Preparing SFT datasets...")
     if args.num_epochs > 0:
-        train_sft_dataset = prepare_sft_dataset(train_dataset, train_target_text_dict)
-        valid_sft_dataset = prepare_sft_dataset(valid_dataset, valid_target_text_dict)
+        print(f"  Completion max tokens: {args.max_new_tokens}")
+        train_sft_dataset = prepare_sft_dataset(
+            train_dataset, train_target_text_dict,
+            tokenizer=tokenizer,
+            max_new_tokens=args.max_new_tokens,
+        )
+        valid_sft_dataset = prepare_sft_dataset(
+            valid_dataset, valid_target_text_dict,
+            tokenizer=tokenizer,
+            max_new_tokens=args.max_new_tokens,
+        )
         
         print(f"  Train samples: {len(train_sft_dataset)}")
         print(f"  Valid samples: {len(valid_sft_dataset)}")
