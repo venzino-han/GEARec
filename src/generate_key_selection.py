@@ -72,6 +72,32 @@ def load_preselected_items(csv_path: str) -> dict:
     return mapping
 
 
+def load_best_from_ranked_csv(ranked_csv_path: str) -> dict:
+    """
+    ranked CSV(user_id, postfix_item_id, rank, ...) 에서
+    유저별 rank 가 가장 낮은(= 가장 좋은) postfix_item_id 를 선정.
+    Returns: {user_id (int): postfix_item_id (int)}
+    """
+    df = pd.read_csv(ranked_csv_path)
+    required = {"user_id", "postfix_item_id", "rank"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"ranked_csv에 필요한 컬럼이 없습니다: {missing}")
+
+    df = df.dropna(subset=["postfix_item_id", "rank"])
+    best = (
+        df.sort_values("rank")
+          .groupby("user_id", as_index=False)
+          .first()[["user_id", "postfix_item_id"]]
+    )
+    mapping = {
+        int(row["user_id"]): int(row["postfix_item_id"])
+        for _, row in best.iterrows()
+    }
+    print(f"Extracted best postfix for {len(mapping)} users from {ranked_csv_path}")
+    return mapping
+
+
 def apply_chat_template(tokenizer, user_prompt: str) -> str:
     messages = [
         {"role": "system", "content": KEY_SELECTION_SYSTEM_PROMPT},
@@ -87,13 +113,19 @@ def apply_chat_template(tokenizer, user_prompt: str) -> str:
 def process_key_selection(args):
     data_name      = args.data_name
     model_dir_name = args.model_name.split("/")[-1]
-    use_suffix    = args.item_suffix or bool(args.preselected_csv)
+
+    # ranked_csv 와 preselected_csv 는 상호 배타적으로 동작
+    # ranked_csv 가 우선
+    use_suffix = args.item_suffix or bool(args.preselected_csv) or bool(args.ranked_csv)
 
     # 출력 파일명
     suffix = ""
     if args.item_suffix:
         suffix += "_suffix"
-    if args.preselected_csv:
+    if args.ranked_csv:
+        csv_stem = os.path.splitext(os.path.basename(args.ranked_csv))[0]
+        suffix += f"_best_from_{csv_stem}"
+    elif args.preselected_csv:
         csv_stem = os.path.splitext(os.path.basename(args.preselected_csv))[0]
         suffix += f"_from_{csv_stem}"
     output_file = (
@@ -112,7 +144,10 @@ def process_key_selection(args):
     title_index = build_title_index(item_metadata)
 
     preselected_map: dict = {}
-    if args.preselected_csv:
+    if args.ranked_csv:
+        # ranked CSV에서 유저별 best postfix 자동 추출
+        preselected_map = load_best_from_ranked_csv(args.ranked_csv)
+    elif args.preselected_csv:
         preselected_map = load_preselected_items(args.preselected_csv)
 
     # 토크나이저 (postfix 모드에서 챗 템플릿 직접 적용)
@@ -212,41 +247,55 @@ def process_key_selection(args):
         print("=" * 60)
 
     # 생성
+    n_samples = getattr(args, 'n_samples', 1)
     llm_generator = LLMGenerator(args)
     responses, token_nums = llm_generator.generate_response(
-        KEY_SELECTION_SYSTEM_PROMPT, prompts, raw_prompt=use_suffix
+        KEY_SELECTION_SYSTEM_PROMPT, prompts,
+        raw_prompt=use_suffix,
+        n_samples=n_samples,
     )
+
+    # n_samples==1 이면 단일 문자열 리스트, >1 이면 리스트의 리스트
+    # 통일을 위해 항상 list[list[str]] 형태로 변환
+    if n_samples == 1:
+        responses_nested = [[r] for r in responses]
+    else:
+        responses_nested = responses
 
     print("\n--- Response samples ---")
     for i in sample_idx:
-        print(f"[index {i}]\n{responses[i]}\n{'-'*60}")
+        for s_idx, r in enumerate(responses_nested[i]):
+            print(f"[index {i}, sample {s_idx}]\n{r}\n{'-'*60}")
 
-    # 결과 저장
+    # 결과 저장 (n_samples > 1이면 유저당 N행)
     rows = []
-    for prompt, user_id, target_item_id, postfix_id, response in zip(
-        prompts, user_ids, target_item_ids, postfix_item_ids, responses
+    for prompt, user_id, target_item_id, postfix_id, sample_responses in zip(
+        prompts, user_ids, target_item_ids, postfix_item_ids, responses_nested
     ):
-        generated_text = response.strip()
-        selected_title_raw = parse_key_item(generated_text)
-        selected_item_id, selected_item_title = resolve_item_id(
-            selected_title_raw, title_index
-        )
-        rows.append({
-            "user_id":              user_id,
-            "target_item_id":       target_item_id,
-            "target_item_title":    get_item_title(item_metadata, target_item_id),
-            "postfix_item_id":      postfix_id,
-            "postfix_item_title":   get_item_title(item_metadata, postfix_id) if postfix_id else "",
-            "selected_item_id":     selected_item_id,
-            "selected_item_title":  selected_item_title,
-            "prompt":               prompt,
-            "generated_text":       generated_text,
-        })
+        for s_idx, response in enumerate(sample_responses):
+            generated_text = response.strip()
+            selected_title_raw = parse_key_item(generated_text)
+            selected_item_id, selected_item_title = resolve_item_id(
+                selected_title_raw, title_index
+            )
+            rows.append({
+                "user_id":             user_id,
+                "target_item_id":      target_item_id,
+                "target_item_title":   get_item_title(item_metadata, target_item_id),
+                "postfix_item_id":     postfix_id,
+                "postfix_item_title":  get_item_title(item_metadata, postfix_id) if postfix_id else "",
+                "selected_item_id":    selected_item_id,
+                "selected_item_title": selected_item_title,
+                "sample_idx":          s_idx,
+                "prompt":              prompt,
+                "generated_text":      generated_text,
+            })
 
     df = pd.DataFrame(rows, columns=[
         "user_id", "target_item_id", "target_item_title",
         "postfix_item_id", "postfix_item_title",
         "selected_item_id", "selected_item_title",
+        "sample_idx",
         "prompt", "generated_text",
     ])
     df.to_csv(output_file, index=False)
@@ -288,6 +337,10 @@ if __name__ == "__main__":
         help="LLMGenerator에서 챗 템플릿을 적용하지 않고 프롬프트를 그대로 사용."
     )
     parser.add_argument(
+        "--n_samples", type=int, default=1,
+        help="프롬프트당 생성할 샘플 수 (vLLM SamplingParams n). 결과는 단일 CSV로 저장."
+    )
+    parser.add_argument(
         "--item_suffix", action="store_true",
         help=(
             "챗 템플릿 적용 후 히스토리 아이템 타이틀을 postfix로 붙여 생성. "
@@ -299,6 +352,14 @@ if __name__ == "__main__":
         help=(
             "user_id, selected_item_id 컬럼을 가진 CSV 경로. "
             "해당 아이템 타이틀을 챗 템플릿 이후 postfix로 사용 (유저당 1개 프롬프트)."
+        ),
+    )
+    parser.add_argument(
+        "--ranked_csv", type=str, default=None,
+        help=(
+            "eval_key_selection.py 가 생성한 ranked CSV 경로 "
+            "(user_id, postfix_item_id, rank 컬럼 필요). "
+            "유저별 rank 최소 postfix_item_id 를 자동 선정하여 suffix로 사용."
         ),
     )
 
