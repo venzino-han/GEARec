@@ -38,13 +38,6 @@ class LLMGenerator:
                 dtype=args.dtype,
                 )
             print("Model loaded")
-            self.sampling_params = SamplingParams(
-                temperature=args.temperature,
-                min_tokens=0,
-                max_tokens=args.max_output_tokens,
-                skip_special_tokens=False,
-            )
-            print("Sampling params set")
 
     def apply_chat_template(self, system_prompt, prompt):
         prompt = [
@@ -53,16 +46,51 @@ class LLMGenerator:
         ]
         return self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
 
-    def generate_response(self, system_prompt, prompts):
+    def generate_response(self, system_prompt, prompts, raw_prompt=False, n_samples=1):
+        """
+        Generate responses for a list of prompts.
+
+        Args:
+            system_prompt: System prompt string (ignored when raw_prompt=True).
+            prompts: List of prompt strings.
+            raw_prompt: When True, prompts are used as-is without applying the
+                        chat template.
+            n_samples: Number of outputs to generate per prompt (vLLM n parameter).
+                       When n_samples > 1, returns list[list[str]] instead of list[str].
+
+        Returns:
+            responses : list[str]          when n_samples == 1
+                        list[list[str]]    when n_samples >  1
+            token_nums: corresponding token count structure
+        """
+        _raw      = raw_prompt or getattr(self.args, 'raw_prompt', False)
+        n_samples = max(1, n_samples)
+
         if self.args.use_deep_infra:
-            # Deep Infra API 호출 및 응답 처리
             responses, token_nums = self._generate_response_with_deep_infra(system_prompt, prompts)
         else:
-            prompts = [ self.apply_chat_template(system_prompt, prompt) for prompt in prompts]            
-            print("Starting to generate responses with vLLM...")
-            outputs = self.llm.generate(prompts, self.sampling_params)
-            responses = [output.outputs[0].text for output in outputs]
-            token_nums = [len(output.outputs[0].text) for output in outputs]
+            if not _raw:
+                prompts = [self.apply_chat_template(system_prompt, p) for p in prompts]
+            else:
+                print("raw_prompt=True: using prompts as-is (no chat template applied)")
+
+            sampling_params = SamplingParams(
+                temperature=self.args.temperature,
+                min_tokens=0,
+                max_tokens=self.args.max_output_tokens,
+                skip_special_tokens=False,
+                n=n_samples,
+            )
+            print(f"Starting to generate responses with vLLM (n_samples={n_samples})...")
+            outputs = self.llm.generate(prompts, sampling_params)
+
+            if n_samples == 1:
+                responses  = [out.outputs[0].text for out in outputs]
+                token_nums = [len(out.outputs[0].token_ids) for out in outputs]
+            else:
+                responses  = [[o.text for o in out.outputs] for out in outputs]
+                token_nums = [[len(o.token_ids) for o in out.outputs] for out in outputs]
+
         return responses, token_nums
 
     def _generate_response_with_openai(self, prompt, system_prompt, model_name="gpt-4o-mini", max_tokens=512, temperature=0.1, timeout=20, max_retries=3):
