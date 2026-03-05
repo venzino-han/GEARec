@@ -95,6 +95,28 @@ def load_from_retrieval_rank_csv(csv_path: str, rank_threshold: int = 100) -> di
     )
     return {int(row["user_id"]): int(row["best_rank_item_id"]) for _, row in df.iterrows()}
 
+def filter_history_by_days(
+    reviews: list, index: int, history_limit: int, days: int
+) -> list:
+    """
+    target 아이템(reviews[index]) 기준으로 days 이내의 히스토리 아이템만 반환.
+    해당 범위 내 아이템이 없으면 가장 최근 아이템 1개만 반환.
+    """
+    target_ts = int(reviews[index].get("timestamp", 0))
+    candidates = reviews[index - history_limit : index]
+
+    if target_ts <= 0 or days <= 0:
+        return candidates
+
+    threshold = days * 24 * 60 * 60
+    filtered = [
+        r for r in candidates
+        if target_ts - int(r.get("timestamp", 0)) <= threshold
+    ]
+    if filtered:
+        return filtered
+    # fallback: 가장 최근 아이템 1개
+    return candidates[-1:]
 
 def load_best_from_ranked_csv(ranked_csv_path: str) -> dict:
     """
@@ -250,10 +272,10 @@ def process_key_selection(args):
 
     for user_id, reviews in tqdm(user2reviews.items(), desc="Building prompts"):
         target_item_id = int(reviews[index]["item_id"])
-        history_item_ids = [
-            int(r["item_id"])
-            for r in reviews[index - args.history_limit : index]
-        ]
+        history_reviews = filter_history_by_days(
+            reviews, index, args.history_limit, args.days
+        )
+        history_item_ids = [int(r["item_id"]) for r in history_reviews]
         assert len(history_item_ids) > 0, f"Empty history for user {user_id}"
 
         # 기본 히스토리 텍스트
