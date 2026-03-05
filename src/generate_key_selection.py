@@ -72,6 +72,30 @@ def load_preselected_items(csv_path: str) -> dict:
     return mapping
 
 
+def load_from_retrieval_rank_csv(csv_path: str, rank_threshold: int = 100) -> dict:
+    """
+    SASRec retrieval rank CSV (user_id, target_item_id, rank, best_rank_item_id, ...)
+    에서 rank <= rank_threshold 인 유저만 선택하고,
+    best_rank_item_id 를 postfix 아이템으로 반환.
+
+    Returns: {user_id (int): best_rank_item_id (int)}
+    """
+    df = pd.read_csv(csv_path)
+    required = {"user_id", "rank", "best_rank_item_id"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"retrieval_rank_csv에 필요한 컬럼이 없습니다: {missing}")
+
+    df = df.dropna(subset=["rank", "best_rank_item_id"])
+    before = len(df)
+    df = df[df["rank"] <= rank_threshold]
+    print(
+        f"Loaded retrieval rank CSV: {len(df)}/{before} users "
+        f"with rank <= {rank_threshold} from {csv_path}"
+    )
+    return {int(row["user_id"]): int(row["best_rank_item_id"]) for _, row in df.iterrows()}
+
+
 def load_best_from_ranked_csv(ranked_csv_path: str) -> dict:
     """
     ranked CSV(user_id, postfix_item_id, rank, ...) 에서
@@ -108,26 +132,64 @@ def apply_chat_template(tokenizer, user_prompt: str) -> str:
     )
 
 
+def build_target_item_hint(
+    item_metadata: dict,
+    item_id: int,
+    data_name: str,
+) -> str:
+    """
+    타겟 아이템의 타이틀을 힌트로 프롬프트에 포함.
+    단, 생성되는 쿼리/선호도 텍스트에서는 타이틀을 직접 언급하지 않고
+    관련 키워드·기능·선호도만 서술하도록 지시.
+    """
+    title = get_item_title(item_metadata, item_id)
+
+    is_yelp = (data_name == "yelp")
+    subject     = "place" if is_yelp else "item"
+    next_action = "visit" if is_yelp else "purchase"
+
+    lines = [
+        f"[Target {subject} for guidance — the user's next {next_action} is: {title}]",
+        f"Using the above as a guiding signal: identify the single key {subject} "
+        f"from the history that most strongly motivates purchasing \"{title}\", "
+        f"then write a preference paragraph that naturally explains the user's underlying "
+        f"preferences, related keywords, desired features, and specific needs — "
+        f"without directly naming \"{title}\" in your output.",
+    ]
+    return "\n".join(lines)
+
+
 # ─── 메인 ────────────────────────────────────────────────────────────────────
 
 def process_key_selection(args):
     data_name      = args.data_name
     model_dir_name = args.model_name.split("/")[-1]
 
-    # ranked_csv 와 preselected_csv 는 상호 배타적으로 동작
-    # ranked_csv 가 우선
-    use_suffix = args.item_suffix or bool(args.preselected_csv) or bool(args.ranked_csv)
+    # ranked_csv / retrieval_rank_csv / preselected_csv 는 상호 배타적으로 동작
+    # 우선순위: retrieval_rank_csv > ranked_csv > preselected_csv
+    use_suffix = (
+        args.item_suffix
+        or bool(args.preselected_csv)
+        or bool(args.ranked_csv)
+        or bool(args.retrieval_rank_csv)
+    )
+    use_target_guided = getattr(args, "target_guided", False)
 
     # 출력 파일명
     suffix = ""
     if args.item_suffix:
         suffix += "_suffix"
-    if args.ranked_csv:
+    if args.retrieval_rank_csv:
+        csv_stem = os.path.splitext(os.path.basename(args.retrieval_rank_csv))[0]
+        suffix += f"_retrieval_rank_top{args.retrieval_rank_threshold}_from_{csv_stem}"
+    elif args.ranked_csv:
         csv_stem = os.path.splitext(os.path.basename(args.ranked_csv))[0]
         suffix += f"_best_from_{csv_stem}"
     elif args.preselected_csv:
         csv_stem = os.path.splitext(os.path.basename(args.preselected_csv))[0]
         suffix += f"_from_{csv_stem}"
+    if use_target_guided:
+        suffix += "_target_guided"
     output_file = (
         f"data_processed/{data_name}_{model_dir_name}_{args.split}"
         f"_key_selection{suffix}.csv"
@@ -144,15 +206,19 @@ def process_key_selection(args):
     title_index = build_title_index(item_metadata)
 
     preselected_map: dict = {}
-    if args.ranked_csv:
-        # ranked CSV에서 유저별 best postfix 자동 추출
+    if args.retrieval_rank_csv:
+        preselected_map = load_from_retrieval_rank_csv(
+            args.retrieval_rank_csv, args.retrieval_rank_threshold
+        )
+    elif args.ranked_csv:
         preselected_map = load_best_from_ranked_csv(args.ranked_csv)
     elif args.preselected_csv:
         preselected_map = load_preselected_items(args.preselected_csv)
 
-    # 토크나이저 (postfix 모드에서 챗 템플릿 직접 적용)
+    # 토크나이저: postfix 모드 또는 target_guided 모드에서 챗 템플릿 직접 적용
+    need_tokenizer = use_suffix or use_target_guided
     tokenizer = None
-    if use_suffix:
+    if need_tokenizer:
         tokenizer = AutoTokenizer.from_pretrained(args.model_name)
         print(f"Tokenizer loaded: {args.model_name}")
 
@@ -171,7 +237,7 @@ def process_key_selection(args):
         history_text_max_length=args.word_limit,
         use_reviews=args.use_reviews,
         days_filter=args.days,
-        apply_chat_template=not use_suffix,  # postfix 모드에서는 직접 적용
+        apply_chat_template=not need_tokenizer,  # postfix/target_guided 모드에서는 직접 적용
     )
 
     split_index = {"train": -3, "valid": -2, "test": -1}
@@ -196,14 +262,26 @@ def process_key_selection(args):
             user_id=user_id,
         )
 
-        if use_suffix:
+        if use_target_guided:
+            # target_guided 모드: 타겟 아이템 메타데이터를 힌트로 삽입 후 챗 템플릿 적용
+            hint = build_target_item_hint(item_metadata, target_item_id, data_name)
+            guided_user_text = history_text + "\n\n" + hint
+            chat_str = apply_chat_template(tokenizer, guided_user_text)
+            prompts.append(chat_str)
+            user_ids.append(user_id)
+            target_item_ids.append(target_item_id)
+            postfix_item_ids.append(None)
+        elif use_suffix:
             # 챗 템플릿 적용 → 문자열 끝에 아이템 타이틀 postfix
             chat_str = apply_chat_template(tokenizer, history_text)
 
             if preselected_map:
-                # preselected_csv 제공 시: 유저당 1개 프롬프트
+                # preselected_csv/retrieval_rank_csv 제공 시: 유저당 1개 프롬프트
                 presel_id = preselected_map.get(user_id)
-                title = get_item_title(item_metadata, presel_id) if presel_id else ""
+                # map에 없는 유저(rank 초과로 필터링된 유저 등)는 skip
+                if presel_id is None:
+                    continue
+                title = get_item_title(item_metadata, presel_id)
                 prompts.append(chat_str + f"<key_item>{title}</key_item>")
                 user_ids.append(user_id)
                 target_item_ids.append(target_item_id)
@@ -246,12 +324,26 @@ def process_key_selection(args):
         print(f"\n[최종 prompt]\n{prompts[i]}")
         print("=" * 60)
 
+    # target_guided 모드: 힌트 삽입 후 챗 템플릿 적용 예시 출력
+    if use_target_guided and prompts:
+        print("\n--- target_guided 적용 예시 ---")
+        i = sample_idx[0]
+        uid = user_ids[i]
+        tid = target_item_ids[i]
+        h_ids = [int(r["item_id"])
+                 for r in user2reviews[uid][index - args.history_limit : index]]
+        hint = build_target_item_hint(item_metadata, tid, data_name)
+        print(f"[타겟 아이템 타이틀] '{get_item_title(item_metadata, tid)}'")
+        print(f"\n[삽입된 힌트]\n{hint}")
+        print(f"\n[최종 prompt]\n{prompts[i]}")
+        print("=" * 60)
+
     # 생성
     n_samples = getattr(args, 'n_samples', 1)
     llm_generator = LLMGenerator(args)
     responses, token_nums = llm_generator.generate_response(
         KEY_SELECTION_SYSTEM_PROMPT, prompts,
-        raw_prompt=use_suffix,
+        raw_prompt=(use_suffix or use_target_guided),
         n_samples=n_samples,
     )
 
@@ -360,6 +452,27 @@ if __name__ == "__main__":
             "eval_key_selection.py 가 생성한 ranked CSV 경로 "
             "(user_id, postfix_item_id, rank 컬럼 필요). "
             "유저별 rank 최소 postfix_item_id 를 자동 선정하여 suffix로 사용."
+        ),
+    )
+    parser.add_argument(
+        "--retrieval_rank_csv", type=str, default=None,
+        help=(
+            "find_trigger_items_from_sequential.py (mode=rank) 가 생성한 CSV 경로 "
+            "(user_id, target_item_id, rank, best_rank_item_id 컬럼 필요). "
+            "--retrieval_rank_threshold 이하인 유저만 선택하고 "
+            "best_rank_item_id 를 postfix로 사용."
+        ),
+    )
+    parser.add_argument(
+        "--retrieval_rank_threshold", type=int, default=100,
+        help="--retrieval_rank_csv 사용 시 포함할 최대 rank 값 (default: 100).",
+    )
+    parser.add_argument(
+        "--target_guided", action="store_true",
+        help=(
+            "타겟(정답) 아이템의 category/brand/description을 힌트로 유저 프롬프트에 삽입하여 생성. "
+            "타이틀은 포함하지 않아 직접 정답을 노출하지 않음. "
+            "모델은 해당 타겟 아이템을 추천할 수 있는 키 아이템과 유저 선호도 텍스트를 생성."
         ),
     )
 

@@ -208,7 +208,7 @@ class PromptGenerator:
                         item_history_text += f"Date: {item_date}\n"
             
             # 기본 히스토리 포맷
-            item_history_text += f"Item Title: {item_title}\n"
+            item_history_text += f"Title: {item_title}\n"
             
             if self.use_brand:
                 item_history_text += f"Brand: {item_brand}\n"
@@ -262,7 +262,7 @@ class PromptGenerator:
                     if item_date:
                         item_history_text += f"Date: {item_date}\n"
 
-            item_history_text += f"Item Title: {item_title}\n"
+            item_history_text += f"Title: {item_title}\n"
             if self.use_brand:
                 item_history_text += f"Brand: {item_brand}\n"
             if self.use_category:

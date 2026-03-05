@@ -17,6 +17,8 @@ from datetime import datetime
 
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 
 from utils.common import (
     load_json,
@@ -126,9 +128,91 @@ def generate_rollouts_with_vllm(
             }
             results.append(result)
     
-    print(f"✓ Generated {len(results)} total outputs ({len(prompts)} prompts × {num_rollouts} rollouts)")
-    
+    print(f"✓ Generated {len(results)} total outputs ({len(prompts)} prompts × {num_rollouts} rollouts)")    
     return results
+
+
+def calculate_rollout_similarities(
+    generation_results: List[Dict],
+    evaluator: RecommendationEvaluator,
+) -> List[Dict]:
+    """
+    Calculate cosine similarity between rollouts from the same prompt/user
+    
+    Args:
+        generation_results: List of generation results with user_id and generated_text
+        evaluator: RecommendationEvaluator instance with embedding model
+    
+    Returns:
+        Updated generation_results with avg_rollout_similarity field
+    """
+    print(f"\n{'='*80}")
+    print(f"📏 Calculating Rollout Similarities")
+    print(f"{'='*80}")
+    
+    # Group results by user_id
+    user_rollouts = {}
+    for result in generation_results:
+        user_id = result['user_id']
+        if user_id not in user_rollouts:
+            user_rollouts[user_id] = []
+        user_rollouts[user_id].append(result)
+    
+    # Extract all texts for embedding
+    all_texts = [r['generated_text'] for r in generation_results]
+    
+    print(f"  Computing embeddings for {len(all_texts)} texts...")
+    
+    # Get embeddings using evaluator's embedding model
+    embeddings = evaluator.compute_embeddings(all_texts)
+    
+    # Convert to numpy if it's a torch tensor
+    if hasattr(embeddings, 'cpu'):
+        embeddings = embeddings.cpu().numpy()
+    
+    # Create a mapping from (user_id, rollout_index) to embedding
+    embedding_map = {}
+    for i, result in enumerate(generation_results):
+        key = (result['user_id'], result['rollout_index'])
+        embedding_map[key] = embeddings[i]
+    
+    print(f"  Calculating similarities for {len(user_rollouts)} users...")
+    
+    # Calculate average similarity for each rollout
+    for user_id, user_results in tqdm(user_rollouts.items(), desc="Computing similarities"):
+        if len(user_results) <= 1:
+            # Only one rollout, no similarity to compute
+            for result in user_results:
+                result['avg_rollout_similarity'] = 1.0
+            continue
+        
+        # Get embeddings for this user's rollouts
+        user_embeddings = []
+        for result in user_results:
+            key = (result['user_id'], result['rollout_index'])
+            user_embeddings.append(embedding_map[key])
+        
+        user_embeddings = np.array(user_embeddings)
+        
+        # Compute pairwise cosine similarities
+        similarities = cosine_similarity(user_embeddings)
+        
+        # For each rollout, compute average similarity with other rollouts
+        for i, result in enumerate(user_results):
+            # Exclude self-similarity (diagonal element)
+            other_sims = np.concatenate([similarities[i, :i], similarities[i, i+1:]])
+            avg_sim = float(np.mean(other_sims)) if len(other_sims) > 0 else 1.0
+            result['avg_rollout_similarity'] = avg_sim
+    
+    print(f"✓ Calculated rollout similarities")
+    
+    # Print summary statistics
+    all_sims = [r['avg_rollout_similarity'] for r in generation_results if 'avg_rollout_similarity' in r]
+    if all_sims:
+        print(f"  Average similarity: {np.mean(all_sims):.4f} ± {np.std(all_sims):.4f}")
+        print(f"  Min: {np.min(all_sims):.4f}, Max: {np.max(all_sims):.4f}")
+    
+    return generation_results
 
 
 def evaluate_rollouts(
@@ -138,7 +222,7 @@ def evaluate_rollouts(
     item_metadata: Dict,
     evaluator: RecommendationEvaluator,
     split: str = "test",
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, List[Dict]]:
     """
     Evaluate each rollout and return results as DataFrame
     
@@ -151,7 +235,8 @@ def evaluate_rollouts(
         split: Dataset split name
     
     Returns:
-        DataFrame with evaluation metrics for each rollout
+        Tuple of (DataFrame with evaluation metrics for each rollout, 
+                  List of rank information for each sample in each rollout)
     """
     print(f"\n{'='*80}")
     print(f"📊 Evaluating Rollouts")
@@ -167,6 +252,7 @@ def evaluate_rollouts(
     
     # Evaluate each rollout
     eval_results = []
+    all_rank_info = []  # Store rank info for all rollouts
     
     # Get unique rollout indices
     num_rollouts = max([r['rollout_index'] for r in results]) + 1
@@ -190,24 +276,62 @@ def evaluate_rollouts(
         
         # Run evaluation for this rollout
         try:
-            metrics = evaluator.evaluate(
-                dataset, 
-                split=split, 
-                save_log=False,
-                pre_generated_texts=generated_texts
+            # Get metrics and rank_info from evaluator
+            # Note: evaluator.evaluate() needs to be modified to return rank_info
+            # For now, we'll call compute_retrieval_metrics directly
+            
+            # First, get the data we need
+            all_prompts = []
+            all_targets = []
+            all_histories = []
+            
+            for i in range(len(dataset)):
+                sample = dataset[i]
+                all_prompts.append(sample["prompt"])
+                all_targets.append(sample["target"])
+                all_histories.append(sample["history"])
+                if i >= len(generated_texts) - 1:
+                    break
+            
+            # Compute embeddings for generated texts
+            query_embeddings = evaluator.compute_embeddings(generated_texts)
+            
+            # Compute retrieval metrics (returns metrics and rank_info)
+            metrics, rank_info = evaluator.compute_retrieval_metrics(
+                query_embeddings, 
+                all_targets[:len(generated_texts)], 
+                all_histories[:len(generated_texts)],
+                ks=[5, 10, 20]
             )
             
+            # Add rollout index and user_id to rank_info
+            for i, rank_data in enumerate(rank_info):
+                rank_data['rollout_index'] = rollout_idx
+                rank_data['user_id'] = rollout_user_ids[i]
+            
+            all_rank_info.extend(rank_info)
+            
+            # Average metrics
+            averaged_metrics = {}
+            for key, values in metrics.items():
+                if isinstance(values, list):
+                    averaged_metrics[key] = sum(values) / len(values) if len(values) > 0 else 0.0
+                else:
+                    averaged_metrics[key] = values
+            
             # Add rollout index to metrics
-            metrics['rollout_index'] = rollout_idx
-            eval_results.append(metrics)
+            averaged_metrics['rollout_index'] = rollout_idx
+            eval_results.append(averaged_metrics)
             
             print(f"  Rollout {rollout_idx} results:")
-            for metric_name, value in metrics.items():
+            for metric_name, value in averaged_metrics.items():
                 if metric_name != 'rollout_index':
                     print(f"    {metric_name}: {value:.4f}")
         
         except Exception as e:
             print(f"  ❌ Error evaluating rollout {rollout_idx}: {e}")
+            import traceback
+            traceback.print_exc()
             continue
     
     # Convert to DataFrame
@@ -217,12 +341,13 @@ def evaluate_rollouts(
     print("✅ Evaluation Complete!")
     print(f"{'='*80}")
     
-    return results_df
+    return results_df, all_rank_info
 
 
 def save_results(
     generation_results: List[Dict],
     eval_results_df: pd.DataFrame,
+    rank_info: List[Dict],
     args,
     split: str = "test",
     output_dir: str = "results",
@@ -233,6 +358,7 @@ def save_results(
     Args:
         generation_results: List of generation results
         eval_results_df: DataFrame with evaluation metrics
+        rank_info: List of rank information for each sample in each rollout
         args: Arguments
         split: Dataset split name
         output_dir: Output directory
@@ -240,15 +366,26 @@ def save_results(
     os.makedirs(output_dir, exist_ok=True)
     
     # Create filename without date
-    base_name = f"zeroshot_{args.data_name}_{split}"
+    base_name = f"zeroshot_{args.data_name}_{args.prompt_type}_{args.num_rollouts}_{split}"
     if args.use_trigger_items:
         base_name += "_trigger"
     
-    # Save generation results
+    # Merge generation results with rank information
     gen_df = pd.DataFrame(generation_results)
+    rank_df = pd.DataFrame(rank_info)
+    
+    # Merge on user_id and rollout_index to add rank columns to generation results
+    if len(rank_df) > 0:
+        gen_df = gen_df.merge(
+            rank_df[['user_id', 'rollout_index', 'target_item', 'target_score', 'rank', 'is_cold', 'target_novelty']], 
+            on=['user_id', 'rollout_index'],
+            how='left'
+        )
+    
+    # Save generation results with rank information
     gen_csv_path = f"{output_dir}/{base_name}_generations.csv"
     gen_df.to_csv(gen_csv_path, index=False)
-    print(f"\n💾 Saved generation results to: {gen_csv_path}")
+    print(f"\n💾 Saved generation results (with rank info) to: {gen_csv_path}")
     
     # Save evaluation results
     eval_csv_path = f"{output_dir}/{base_name}_eval.csv"
@@ -266,6 +403,118 @@ def save_results(
         mean_val = eval_results_df[col].mean()
         std_val = eval_results_df[col].std()
         print(f"{col:20s}: {mean_val:.4f} ± {std_val:.4f}")
+    
+    # Print rank statistics
+    if len(rank_df) > 0:
+        print(f"\n{'='*80}")
+        print("📊 Rank Statistics")
+        print(f"{'='*80}")
+        print(f"Average rank: {rank_df['rank'].mean():.2f}")
+        print(f"Median rank: {rank_df['rank'].median():.2f}")
+        print(f"Min rank: {rank_df['rank'].min()}")
+        print(f"Max rank: {rank_df['rank'].max()}")
+        
+        # Per-rollout rank statistics
+        print(f"\n{'='*80}")
+        print("📊 Rank Statistics by Rollout")
+        print(f"{'='*80}")
+        for rollout_idx in sorted(rank_df['rollout_index'].unique()):
+            rollout_ranks = rank_df[rank_df['rollout_index'] == rollout_idx]['rank']
+            print(f"Rollout {rollout_idx}: mean={rollout_ranks.mean():.2f}, "
+                  f"median={rollout_ranks.median():.2f}, "
+                  f"min={rollout_ranks.min()}, max={rollout_ranks.max()}")
+        
+        # Per-user rank statistics: difference between mean and min rank
+        print(f"\n{'='*80}")
+        print("📊 Per-User Rank Analysis: Mean - Min Difference")
+        print(f"{'='*80}")
+        
+        user_rank_diffs = []
+        for user_id in rank_df['user_id'].unique():
+            user_ranks = rank_df[rank_df['user_id'] == user_id]['rank']
+            mean_rank = user_ranks.mean()
+            min_rank = user_ranks.min()
+            max_rank = user_ranks.max()
+            rank_diff = mean_rank - min_rank
+            user_rank_diffs.append({
+                'user_id': user_id,
+                'mean_rank': mean_rank,
+                'min_rank': min_rank,
+                'max_rank': max_rank,
+                'diff': rank_diff
+            })
+        
+        # Calculate average difference for all users
+        avg_rank_diff = np.mean([d['diff'] for d in user_rank_diffs])
+        print(f"Average (Mean Rank - Min Rank) across all users: {avg_rank_diff:.2f}")
+        print(f"Number of users analyzed: {len(user_rank_diffs)}")
+        
+        # Additional statistics for all users
+        rank_diffs = [d['diff'] for d in user_rank_diffs]
+        print(f"Std of rank differences: {np.std(rank_diffs):.2f}")
+        print(f"Min difference: {np.min(rank_diffs):.2f}")
+        print(f"Max difference: {np.max(rank_diffs):.2f}")
+        print(f"Median difference: {np.median(rank_diffs):.2f}")
+        
+        # Filter users with min_rank <= 100
+        filtered_user_diffs_le100 = [d for d in user_rank_diffs if d['min_rank'] <= 100]
+        
+        if len(filtered_user_diffs_le100) > 0:
+            print(f"\n{'='*80}")
+            print("📊 Per-User Rank Analysis (Min Rank ≤ 100 only)")
+            print(f"{'='*80}")
+            
+            filtered_rank_diffs = [d['diff'] for d in filtered_user_diffs_le100]
+            filtered_avg_rank_diff = np.mean(filtered_rank_diffs)
+            
+            print(f"Average (Mean Rank - Min Rank) for users with min_rank ≤ 100: {filtered_avg_rank_diff:.2f}")
+            print(f"Number of users with min_rank ≤ 100: {len(filtered_user_diffs_le100)}")
+            print(f"Percentage of total users: {len(filtered_user_diffs_le100) / len(user_rank_diffs) * 100:.1f}%")
+            print(f"Std of rank differences: {np.std(filtered_rank_diffs):.2f}")
+            print(f"Min difference: {np.min(filtered_rank_diffs):.2f}")
+            print(f"Max difference: {np.max(filtered_rank_diffs):.2f}")
+            print(f"Median difference: {np.median(filtered_rank_diffs):.2f}")
+            
+            # Save filtered results to separate CSV
+            filtered_user_rank_diff_df = pd.DataFrame(filtered_user_diffs_le100)
+            filtered_diff_csv_path = f"{output_dir}/{base_name}_user_rank_diff_min100.csv"
+            filtered_user_rank_diff_df.to_csv(filtered_diff_csv_path, index=False)
+            print(f"\n💾 Saved filtered per-user rank differences (min_rank ≤ 100) to: {filtered_diff_csv_path}")
+        else:
+            print(f"\n⚠️  No users found with min_rank ≤ 100")
+        
+        # Filter users with min_rank > 100
+        filtered_user_diffs_gt100 = [d for d in user_rank_diffs if d['min_rank'] > 100]
+        
+        if len(filtered_user_diffs_gt100) > 0:
+            print(f"\n{'='*80}")
+            print("📊 Per-User Rank Analysis (Min Rank > 100 only)")
+            print(f"{'='*80}")
+            
+            filtered_rank_diffs_gt = [d['diff'] for d in filtered_user_diffs_gt100]
+            filtered_avg_rank_diff_gt = np.mean(filtered_rank_diffs_gt)
+            
+            print(f"Average (Mean Rank - Min Rank) for users with min_rank > 100: {filtered_avg_rank_diff_gt:.2f}")
+            print(f"Number of users with min_rank > 100: {len(filtered_user_diffs_gt100)}")
+            print(f"Percentage of total users: {len(filtered_user_diffs_gt100) / len(user_rank_diffs) * 100:.1f}%")
+            print(f"Std of rank differences: {np.std(filtered_rank_diffs_gt):.2f}")
+            print(f"Min difference: {np.min(filtered_rank_diffs_gt):.2f}")
+            print(f"Max difference: {np.max(filtered_rank_diffs_gt):.2f}")
+            print(f"Median difference: {np.median(filtered_rank_diffs_gt):.2f}")
+            
+            # Save filtered results to separate CSV
+            filtered_user_rank_diff_gt_df = pd.DataFrame(filtered_user_diffs_gt100)
+            filtered_diff_csv_path_gt = f"{output_dir}/{base_name}_user_rank_diff_mingt100.csv"
+            filtered_user_rank_diff_gt_df.to_csv(filtered_diff_csv_path_gt, index=False)
+            print(f"\n💾 Saved filtered per-user rank differences (min_rank > 100) to: {filtered_diff_csv_path_gt}")
+        else:
+            print(f"\n⚠️  No users found with min_rank > 100")
+        
+        # Save all per-user rank differences to CSV
+        user_rank_diff_df = pd.DataFrame(user_rank_diffs)
+        user_diff_csv_path = f"{output_dir}/{base_name}_user_rank_diff.csv"
+        user_rank_diff_df.to_csv(user_diff_csv_path, index=False)
+        print(f"\n💾 Saved per-user rank differences (all users) to: {user_diff_csv_path}")
     
     print(f"{'='*80}\n")
 
@@ -417,17 +666,8 @@ def main():
     for split in args.splits:
         print(f"  {split}: {len(datasets[split])} users")
     
-    # vLLM 모델 로드 (한 번만)
-    print(f"\n🤖 Loading vLLM model...")
+    # 모델 경로 설정
     model_path = args.checkpoint_dir if args.checkpoint_dir else args.model_name
-    print(f"  Model path: {model_path}")
-    
-    llm = LLM(
-        model=model_path,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        dtype=torch.bfloat16,
-        trust_remote_code=True,
-    )
     
     # Evaluator 생성 (한 번만)
     print(f"\n🔍 Creating evaluator...")
@@ -449,6 +689,19 @@ def main():
                 data = dataset[i]
                 prompts.append(data['prompt'])
                 user_ids.append(data['user_id'])
+                if i > args.eval_samples:
+                    break
+            
+            # vLLM 모델 로드 (각 split마다)
+            print(f"\n🤖 Loading vLLM model for {split} split...")
+            print(f"  Model path: {model_path}")
+            
+            llm = LLM(
+                model=model_path,
+                gpu_memory_utilization=args.gpu_memory_utilization,
+                dtype=torch.bfloat16,
+                trust_remote_code=True,
+            )
             
             # Generate rollouts
             generation_results = generate_rollouts_with_vllm(
@@ -462,8 +715,22 @@ def main():
                 top_k=args.top_k,
             )
             
+            # Generation 완료 후 LLM 객체 삭제하여 메모리 확보
+            print(f"\n🧹 Cleaning up LLM to free memory...")
+            del llm
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            gc.collect()
+            print(f"✓ Memory freed")
+            
+            # Calculate rollout similarities
+            generation_results = calculate_rollout_similarities(
+                generation_results=generation_results,
+                evaluator=evaluator,
+            )
+            
             # Evaluate rollouts
-            eval_results_df = evaluate_rollouts(
+            eval_results_df, rank_info = evaluate_rollouts(
                 args=args,
                 results=generation_results,
                 dataset=dataset,
@@ -476,6 +743,7 @@ def main():
             save_results(
                 generation_results=generation_results,
                 eval_results_df=eval_results_df,
+                rank_info=rank_info,
                 args=args,
                 split=split,
                 output_dir=args.output_dir,
@@ -484,8 +752,7 @@ def main():
             print(f"\n✅ Completed evaluation for {split} split")
     
     finally:
-        # Clean up
-        del llm
+        # Clean up evaluator
         evaluator.cleanup()
         del evaluator
         torch.cuda.empty_cache()
