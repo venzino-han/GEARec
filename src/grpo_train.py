@@ -489,7 +489,7 @@ def parse_args():
     # Prompt Generation
     parser.add_argument("--prompt_type", type=str, default="seq_rec", help="Prompt template")
     parser.add_argument("--use_brand", action="store_true", default=True, help="Include brand in prompt")
-    parser.add_argument("--use_category", action="store_true", default=True, help="Include category in prompt")
+    parser.add_argument("--use_category", action="store_true", help="Include category in prompt")
     parser.add_argument("--use_description", action="store_true", help="Include description in prompt")
     parser.add_argument("--use_features", action="store_true", help="Include features in prompt")
     parser.add_argument("--use_date", action="store_true", default=True, help="Include purchase date information in prompt")

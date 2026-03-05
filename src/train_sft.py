@@ -4,6 +4,9 @@ SFT Training Script for Recommendation System
 Supervised Fine-Tuning using TRL's SFTTrainer
 """
 
+import os
+import random
+import re
 import torch
 import argparse
 import gc
@@ -15,27 +18,15 @@ from transformers import (
 )
 from datasets import Dataset
 from trl import SFTConfig, SFTTrainer
-from peft import LoraConfig, PeftModel
-
-from vllm import LLM, SamplingParams
-from vllm.lora.request import LoRARequest
 
 import os
 import json
-import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
-import random
-from collections import defaultdict
-from typing import Callable, List, Dict, Tuple, Any
+from typing import Dict
 
 from utils.common import (
-    load_json,
     print_arguments,
-    get_vllm_model,
-    get_sampling_params,
-    generate_response_with_vllm,
     initialize_tokenizer,
     )
 from utils.dataset import create_dataloaders
@@ -160,12 +151,20 @@ def load_target_text_from_file(args, split="train"):
 def load_target_text_from_key_selection_csv(
     csv_path: str,
     max_rank_threshold: int = None,
+    cf_csv_path: str = None,
+    cf_rank_threshold: int = None,
 ) -> dict:
     """
     eval_key_selection.py 가 생성한 ranked CSV에서 SFT 타겟 텍스트 로드.
 
     CSV 컬럼: user_id, generated_text, rank, sample_idx, ...
     유저당 여러 샘플이 있을 경우 rank 가 가장 낮은(좋은) 샘플 1개를 선택.
+
+    CF 보강 옵션 (cf_csv_path 지정 시):
+      1. main CSV 에서 rank > max_rank_threshold 인 "미커버 유저" 선별
+      2. cf_csv 에서 rank <= cf_rank_threshold 인 케이스 중 미커버 유저만 선택,
+         generated_text 를 CF 결과로 치환
+      3. 합산(main 커버 + cf 보강 + cf 불가 원본)으로 dict 반환
 
     Returns:
         {user_id (int): generated_text (str)}
@@ -180,13 +179,71 @@ def load_target_text_from_key_selection_csv(
 
     print(f"✓ Loaded {len(df)} rows  (users: {df['user_id'].nunique()})")
 
-    original_count = len(df)
-    if max_rank_threshold is not None:
-        df = df[df["rank"] <= max_rank_threshold]
-        print(f"  Filtered rank <= {max_rank_threshold}: {original_count} → {len(df)} rows")
+    # ── CF 보강 경로 ──────────────────────────────────────────────────────────
+    if cf_csv_path is not None:
+        _cf_rank_thr = cf_rank_threshold if cf_rank_threshold is not None else max_rank_threshold
+        _main_thr    = max_rank_threshold  # None 이면 전체가 "커버"로 간주
+
+        if _main_thr is None:
+            raise ValueError(
+                "--cf_key_selection_csv 를 사용하려면 --max_rank_threshold 도 함께 지정해야 합니다."
+            )
+
+        covered   = df[df["rank"] <= _main_thr].copy()
+        uncovered = df[df["rank"] >  _main_thr].copy()
+        uncovered_users = set(uncovered["user_id"].unique())
+
+        print(f"  rank <= {_main_thr}: {len(covered)} rows  ({covered['user_id'].nunique()} users)  ← 그대로 사용")
+        print(f"  rank >  {_main_thr}: {len(uncovered)} rows  ({len(uncovered_users)} users)  ← CF 보강 대상")
+
+        if not os.path.isfile(cf_csv_path):
+            print(f"  ⚠️  CF CSV not found ({cf_csv_path}). CF 보강 없이 main 단독 사용.")
+            df_merged = df
+        else:
+            print(f"\n📄 Loading CF key-selection results from: {cf_csv_path}")
+            df_cf = pd.read_csv(cf_csv_path)
+            print(f"✓ Loaded CF {len(df_cf)} rows  (users: {df_cf['user_id'].nunique()})")
+
+            cf_filtered = df_cf[
+                (df_cf["rank"] <= _cf_rank_thr) &
+                (df_cf["user_id"].isin(uncovered_users))
+            ].copy()
+
+            cf_users_found = set(cf_filtered["user_id"].unique())
+            still_missing  = uncovered_users - cf_users_found
+
+            print(f"  CF rank <= {_cf_rank_thr} & 미커버 유저: {len(cf_filtered)} rows  ({len(cf_users_found)} users)")
+            print(f"  CF 로도 보강 불가 유저: {len(still_missing)}")
+
+            # 미커버 유저의 main 행에 CF best generated_text 덮어쓰기
+            cf_best = (
+                cf_filtered
+                .sort_values("rank")
+                .groupby("user_id", as_index=False)
+                .first()[["user_id", "generated_text", "rank"]]
+                .rename(columns={"generated_text": "_cf_text", "rank": "_cf_rank"})
+            )
+
+            to_replace = uncovered[uncovered["user_id"].isin(cf_users_found)].copy()
+            to_replace = to_replace.merge(cf_best, on="user_id", how="left")
+            to_replace["generated_text"] = to_replace["_cf_text"]
+            to_replace["rank"]           = to_replace["_cf_rank"]
+            to_replace = to_replace.drop(columns=["_cf_text", "_cf_rank"])
+
+            df_merged = pd.concat([covered, to_replace], ignore_index=True)
+
+        print(f"\n[merged] {len(df_merged)} rows  ({df_merged['user_id'].nunique()} users)")
+        df = df_merged
+
+    else:
+        # ── 기존 단순 rank 필터 경로 ──────────────────────────────────────────
+        original_count = len(df)
+        if max_rank_threshold is not None:
+            df = df[df["rank"] <= max_rank_threshold]
+            print(f"  Filtered rank <= {max_rank_threshold}: {original_count} → {len(df)} rows")
 
     # 유저당 rank 최소 샘플 선택
-    df = df.sort_values("rank").groupby("user_id", as_index=False).first()
+    # df = df.sort_values("rank").groupby("user_id", as_index=False).first()
 
     target_text_dict = {
         int(row["user_id"]): str(row["generated_text"])
@@ -433,6 +490,14 @@ def get_last_item_text(dataset, item_metadata, use_brand=True, use_category=True
     return last_item_texts
 
 
+def strip_xml_tags(text: str) -> str:
+    """
+    Remove XML-like tags (e.g. <key_item>, </query>, <thinking>) from text
+    while preserving their inner content.
+    """
+    return re.sub(r"</?[\w_]+>", "", text).strip()
+
+
 def evaluate_final_metrics(args, dataset, split="test", pre_generated_texts=None, item_metadata=None):
     """
     최종 평가: RecommendationEvaluator를 사용하여 평가
@@ -459,7 +524,14 @@ def evaluate_final_metrics(args, dataset, split="test", pre_generated_texts=None
     if torch.cuda.is_available():
         torch.cuda.synchronize()
         print(f"💾 GPU Memory before evaluation: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-    
+
+    # XML 태그 제거 (<key_item>, <query>, <thinking> 등)
+    if pre_generated_texts is not None:
+        pre_generated_texts = [strip_xml_tags(t) for t in pre_generated_texts]
+        print(f"✓ Stripped XML tags from {len(pre_generated_texts)} generated texts")
+        if pre_generated_texts:
+            print(f"  Sample (first 200 chars): {pre_generated_texts[0][:200]}")
+
     # 마지막 아이템 prepend 옵션 처리
     if args.prepend_last_item and pre_generated_texts is not None:
         if item_metadata is None:
@@ -541,12 +613,16 @@ def parse_arguments():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--max_steps", type=int, default=5000)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
+    parser.add_argument("--loss_type", type=str, default="sft",
+                        help="SFT loss type (e.g. 'sft', 'dft', 'nca_pair', 'ipo', etc.)")
     
     # Token settings
     parser.add_argument("--max_length", type=int, default=1024*2,
                         help="Maximum sequence length for SFT")
     parser.add_argument("--max_new_tokens", type=int, default=128,
                         help="Maximum new tokens for generation")
+    parser.add_argument("--train_max_new_tokens", type=int, default=None,
+                        help="Maximum new tokens for train completion truncation (defaults to max_new_tokens if not set)")
     parser.add_argument("--eval_max_tokens", type=int, default=128,
                         help="Maximum new tokens for generation")
 
@@ -572,6 +648,12 @@ def parse_arguments():
                         help="Maximum rank threshold - only use samples with current_rank <= this value")
     parser.add_argument("--min_rank_improvement", type=float, default=None,
                         help="Minimum rank improvement threshold - only use samples with rank_improvement >= this value")
+    parser.add_argument("--cf_key_selection_csv", type=str, default=None,
+                        help="CF 보강용 key-selection ranked CSV. "
+                             "main CSV(--key_selection_csv)에서 rank > --max_rank_threshold 인 유저를 "
+                             "이 CSV의 rank <= --cf_rank_threshold 케이스로 generated_text 치환.")
+    parser.add_argument("--cf_rank_threshold", type=int, default=None,
+                        help="CF CSV 에서 사용할 rank 임계값 (미지정 시 --max_rank_threshold 값 사용)")
     
     # Prompt Generation settings
     parser.add_argument("--prompt_type", type=str, default="seq_rec",
@@ -610,7 +692,7 @@ def parse_arguments():
                         help="Final checkpoint directory for evaluation")
     parser.add_argument("--logging_steps", type=int, default=100)
     parser.add_argument("--save_steps", type=int, default=500)
-    parser.add_argument("--eval_steps", type=int, default=5000)
+    parser.add_argument("--eval_steps", type=int, default=10000)
     parser.add_argument("--save_total_limit", type=int, default=3)
     parser.add_argument("--report_to", type=str, default="wandb",
                         help="Logging backend (wandb, tensorboard, none)")
@@ -620,6 +702,8 @@ def parse_arguments():
                         help="Run evaluation after training")
     parser.add_argument("--eval_on_train", action="store_true",
                         help="Run evaluation on train set")
+    parser.add_argument("--eval_on_valid", action="store_true",
+                        help="Run evaluation on valid set")
     parser.add_argument("--eval_on_test", action="store_true", default=True,
                         help="Run evaluation on test set")
     parser.add_argument("--emb_model_name", type=str, 
@@ -784,6 +868,8 @@ def main():
         train_target_text_dict = load_target_text_from_key_selection_csv(
             csv_path=args.key_selection_csv,
             max_rank_threshold=args.max_rank_threshold,
+            cf_csv_path=args.cf_key_selection_csv,
+            cf_rank_threshold=args.cf_rank_threshold,
         )
 
         # Valid set은 item metadata 기본 방식 사용
@@ -801,13 +887,14 @@ def main():
         raise ValueError(f"Unknown target_type: {args.target_type}")
     
     # SFT 데이터셋 준비
+    train_max_new_tokens = args.train_max_new_tokens if args.train_max_new_tokens is not None else args.max_new_tokens
     print(f"\n📦 Preparing SFT datasets...")
     if args.num_epochs > 0:
-        print(f"  Completion max tokens: {args.max_new_tokens}")
+        print(f"  Completion max tokens (train): {train_max_new_tokens}")
         train_sft_dataset = prepare_sft_dataset(
             train_dataset, train_target_text_dict,
             tokenizer=tokenizer,
-            max_new_tokens=args.max_new_tokens,
+            max_new_tokens=train_max_new_tokens,
         )
         valid_sft_dataset = prepare_sft_dataset(
             valid_dataset, valid_target_text_dict,
@@ -876,6 +963,7 @@ def main():
             learning_rate=args.learning_rate,
             bf16=True,
             lr_scheduler_type="cosine",
+            loss_type=args.loss_type,
             report_to=args.report_to if args.report_to != "none" else None,
             dataset_kwargs={
                 "add_special_tokens": False,
@@ -967,8 +1055,33 @@ def main():
             print("\nTrain Results:")
             for metric_name, value in train_results.items():
                 print(f"  {metric_name.upper()}: {value:.4f}")
+            _keys = ['hit@5', 'ndcg@5', 'hit@10', 'ndcg@10']
+            print("\t".join(f"{train_results[k]:.4f}" for k in _keys if k in train_results))
             print("="*80)
         
+        # Valid set 평가
+        if args.eval_on_valid:
+            print("\n" + "="*80)
+            print("📊 Evaluating on VALID Set")
+            print("="*80)
+            valid_results = evaluate_final_metrics(
+                args,
+                valid_dataset,
+                split="valid",
+                pre_generated_texts=None,
+                item_metadata=item_metadata
+            )
+
+            print("\n" + "="*80)
+            print("✅ Valid Evaluation Complete!")
+            print("="*80)
+            print("\nValid Results:")
+            for metric_name, value in valid_results.items():
+                print(f"  {metric_name.upper()}: {value:.4f}")
+            _keys = ['hit@5', 'ndcg@5', 'hit@10', 'ndcg@10']
+            print("\t".join(f"{valid_results[k]:.4f}" for k in _keys if k in valid_results))
+            print("="*80)
+
         # Test set 평가
         if args.eval_on_test:
             print("\n" + "="*80)
@@ -988,6 +1101,8 @@ def main():
             print("\nTest Results:")
             for metric_name, value in test_results.items():
                 print(f"  {metric_name.upper()}: {value:.4f}")
+            _keys = ['hit@5', 'ndcg@5', 'hit@10', 'ndcg@10']
+            print("\t".join(f"{test_results[k]:.4f}" for k in _keys if k in test_results))
             print("="*80)
     
     print("\n✓ Done!")
