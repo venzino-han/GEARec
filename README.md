@@ -25,17 +25,21 @@ The resulting dataset is used to fine-tune an LLM. Inference is performed in a *
 
 Existing LLM-based recommendation pipelines often suffer from **context-utilization bias**. The model tries to connect too many past interactions, including noisy or weakly relevant ones, which leads to spurious reasoning and sparse successful trajectories.
 
-<p align="center">
+<!-- <p align="center">
   <img src="./figs/motiv.png" alt="Existing methods fail due to context-utilization bias and reward sparsity (left), whereas our framework discovers a valid reasoning path guided by a high-relevance anchor (right)." width="700"/>
-</p>
+</p> -->
+![Existing methods fail due to context-utilization bias and reward sparsity (left), whereas our framework discovers a valid reasoning path guided by a high-relevance anchor (right).](./figs/motiv.png)
+
 
 ### What GEARec does differently
 
 GEARec identifies a **single decisive key item** from the interaction history, uses that item to generate a focused intent query, and filters out trajectories that are not actually retrievable.
 
-<p align="center">
+<!-- <p align="center">
   <img src="./figs/method.png" alt="Overview of the proposed framework, GEARec." width="900"/>
-</p>
+</p> -->
+![Overview of the proposed framework, GEARec.](./figs/method.png)
+
 
 ---
 
@@ -80,49 +84,6 @@ Using the ranked CSV:
 1. **Best-of-N generation** (`src/generate_key_selection.py --ranked_csv`): For each user, the history item with the lowest (best) rank is selected as the anchor. The LLM then generates N samples (e.g., N=8) with temperature > 0 to produce diverse trajectories.
 2. **Reachability re-evaluation** (`src/eval_key_selection.py`): The best-of-N samples are ranked again to identify which trajectories can retrieve the target.
 3. **SFT on reachable trajectories** (`src/train_sft.py`): Only samples whose rank is within `--max_rank_threshold` (e.g., top-100) are retained for supervised fine-tuning using TRL's `SFTTrainer`.
-
----
-
-## Repository Structure
-
-```text
-.
-├── data/                          # Preprocessed datasets
-│   └── {dataset}/
-│       ├── user2reviews_with_date.json
-│       └── item_metadata.json
-├── data_processed/                # Intermediate CSVs from generation/evaluation
-├── data_emb/                      # Precomputed item/user embeddings
-├── figs/                          # Figures for the paper
-├── results/                       # Evaluation result logs
-├── runs/                          # Shell scripts for each pipeline stage
-│   ├── 1_key_selection_basic.sh         # Stage 1a: basic key selection (test)
-│   ├── 2_key_selection_suffix_titles.sh # Stage 1b: item-suffix mode (train/valid)
-│   ├── 3_key_selection_preselected.sh   # Stage 1c: key selection with preselected anchor
-│   ├── 4_eval_key_selection_all.sh      # Stage 2: reachability evaluation
-│   ├── 5_best_postfix_sample8.sh        # Stage 3a: best-of-N generation (N=8)
-│   ├── 6_eval_postfix_all.sh            # Stage 3b: re-evaluate best-of-N
-│   └── 7_sft_key_selection.sh           # Stage 4: SFT training
-├── src/
-│   ├── generate_key_selection.py        # Key item extraction (Stages 1, 3a)
-│   ├── eval_key_selection.py            # Reachability evaluation (Stages 2, 3b)
-│   ├── train_sft.py                     # SFT training (Stage 4)
-│   ├── train_embedding.py               # Text encoder / alignment training
-│   ├── rejection_sampling.py            # Rejection sampling for RL data
-│   ├── generate_user_preference.py      # User preference summary generation
-│   ├── evaluator.py                     # Retrieval evaluator
-│   ├── llm_generator.py                 # vLLM-based LLM inference wrapper
-│   ├── similarity_based_retrieval.py    # CF-based (SASRec) item retrieval
-│   ├── extract_item_emb.py              # Item embedding extraction
-│   ├── extract_user_emb.py              # User embedding extraction
-│   └── utils/
-│       ├── dataset.py                   # PromptGenerator, dataloader
-│       ├── prompt_templates.py          # Prompt templates per dataset
-│       ├── reward_function.py           # Retrieval metrics and reward helpers
-│       └── common.py                    # Shared utilities
-└── utils/
-    └── device_tracker.py                # GPU device allocation tracker
-```
 
 ---
 
