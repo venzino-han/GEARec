@@ -33,7 +33,7 @@ def process_item_features(args):
     Processes item features to extract title embeddings for a specified dataset,
     and optionally generates new item summaries using an LLM.
     """
-    # 기존 코드: 데이터 로드 및 경로 설정
+    # Load data and configure paths
     data_name = args.data_name
     model_name = args.model_name
 
@@ -52,7 +52,7 @@ def process_item_features(args):
         user2reviews = json.load(f)
     user2reviews = {int(k): v for k, v in user2reviews.items()}
 
-    # PromptGenerator 생성
+    # Create PromptGenerator
     prompt_generator = PromptGenerator(
         item_metadata=item_metadata,
         data_name=data_name,
@@ -69,7 +69,7 @@ def process_item_features(args):
         days_filter=args.days,
     )
 
-    # 프롬프트 생성
+    # Generate prompts
     uid_2_history_text = {}
     if args.split == "train":
         index = -3
@@ -80,12 +80,12 @@ def process_item_features(args):
     
     for user_id, reviews in user2reviews.items():
         target_timestamp = int(reviews[index]["timestamp"])
-        # 히스토리 아이템 ID 추출
+        # Extract history item IDs
         history_item_ids = [int(review["item_id"]) for review in reviews[index-args.history_limit:index]]
 
         assert len(history_item_ids) > 0, f"History item ids is empty for user {user_id}"
         
-        # PromptGenerator를 사용하여 히스토리 텍스트 생성
+        # Generate history text using PromptGenerator
         history_text = prompt_generator.generate_prompt(
             item_ids=history_item_ids,
             user_id=user_id,
@@ -94,7 +94,7 @@ def process_item_features(args):
         
         uid_2_history_text[user_id] = history_text
 
-    # LLM 기반 요약 생성
+    # Generate LLM-based summaries
     print("Generating item summaries using LLM...")
     prompts = []
     user_ids = []

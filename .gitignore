@@ -6,3 +6,5 @@
 checkpoints/
 wandb/
 *.pyc
+results/*.csv
+results/*.log

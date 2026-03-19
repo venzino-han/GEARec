@@ -27,7 +27,7 @@ def get_item_title(item_metadata: dict, item_id: int) -> str:
 
 
 def build_title_index(item_metadata: dict) -> dict:
-    """normalized title -> item_id 역인덱스"""
+    """normalized title -> item_id reverse index"""
     index = {}
     for item_id, meta in item_metadata.items():
         title = meta.get("title", meta.get("name", ""))
@@ -39,7 +39,7 @@ def build_title_index(item_metadata: dict) -> dict:
 
 
 def parse_key_item(response: str) -> str:
-    """<key_item> 또는 <key_place> 태그에서 선택된 아이템 이름 추출"""
+    """Extract selected item name from <key_item> or <key_place> tag"""
     for tag in ("key_item", "key_place"):
         m = re.search(rf'<{tag}>(.*?)</{tag}>', response, re.DOTALL)
         if m:
@@ -48,7 +48,7 @@ def parse_key_item(response: str) -> str:
 
 
 def resolve_item_id(title_str: str, title_index: dict) -> tuple:
-    """생성된 타이틀 문자열 → (item_id, title_str). 매칭 실패 시 (None, title_str)"""
+    """Generated title string → (item_id, title_str). Returns (None, title_str) if matching fails."""
     key = title_str.lower().strip()
     if not key:
         return None, title_str
@@ -61,7 +61,7 @@ def resolve_item_id(title_str: str, title_index: dict) -> tuple:
 
 
 def load_preselected_items(csv_path: str) -> dict:
-    """CSV(user_id, selected_item_id) → {user_id: item_id} 딕셔너리"""
+    """CSV(user_id, selected_item_id) → {user_id: item_id} dictionary"""
     df = pd.read_csv(csv_path)
     mapping = {
         int(row["user_id"]): int(row["selected_item_id"])
@@ -75,8 +75,8 @@ def load_preselected_items(csv_path: str) -> dict:
 def load_from_retrieval_rank_csv(csv_path: str, rank_threshold: int = 100) -> dict:
     """
     SASRec retrieval rank CSV (user_id, target_item_id, rank, best_rank_item_id, ...)
-    에서 rank <= rank_threshold 인 유저만 선택하고,
-    best_rank_item_id 를 postfix 아이템으로 반환.
+    selecting only users with rank <= rank_threshold,
+    and returning best_rank_item_id as the postfix item.
 
     Returns: {user_id (int): best_rank_item_id (int)}
     """
@@ -84,7 +84,7 @@ def load_from_retrieval_rank_csv(csv_path: str, rank_threshold: int = 100) -> di
     required = {"user_id", "rank", "best_rank_item_id"}
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"retrieval_rank_csv에 필요한 컬럼이 없습니다: {missing}")
+        raise ValueError(f"Required columns missing from retrieval_rank_csv: {missing}")
 
     df = df.dropna(subset=["rank", "best_rank_item_id"])
     before = len(df)
@@ -99,8 +99,8 @@ def filter_history_by_days(
     reviews: list, index: int, history_limit: int, days: int
 ) -> list:
     """
-    target 아이템(reviews[index]) 기준으로 days 이내의 히스토리 아이템만 반환.
-    해당 범위 내 아이템이 없으면 가장 최근 아이템 1개만 반환.
+    Return only history items within `days` of the target item (reviews[index]).
+    If no items fall within that range, return only the single most recent item.
     """
     target_ts = int(reviews[index].get("timestamp", 0))
     candidates = reviews[index - history_limit : index]
@@ -115,20 +115,20 @@ def filter_history_by_days(
     ]
     if filtered:
         return filtered
-    # fallback: 가장 최근 아이템 1개
+    # fallback: single most recent item
     return candidates[-1:]
 
 def load_best_from_ranked_csv(ranked_csv_path: str) -> dict:
     """
-    ranked CSV(user_id, postfix_item_id, rank, ...) 에서
-    유저별 rank 가 가장 낮은(= 가장 좋은) postfix_item_id 를 선정.
+    Select the postfix_item_id with the lowest (= best) rank per user
+    from a ranked CSV (user_id, postfix_item_id, rank, ...).
     Returns: {user_id (int): postfix_item_id (int)}
     """
     df = pd.read_csv(ranked_csv_path)
     required = {"user_id", "postfix_item_id", "rank"}
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"ranked_csv에 필요한 컬럼이 없습니다: {missing}")
+        raise ValueError(f"Required columns missing from ranked_csv: {missing}")
 
     df = df.dropna(subset=["postfix_item_id", "rank"])
     best = (
@@ -160,9 +160,9 @@ def build_target_item_hint(
     data_name: str,
 ) -> str:
     """
-    타겟 아이템의 타이틀을 힌트로 프롬프트에 포함.
-    단, 생성되는 쿼리/선호도 텍스트에서는 타이틀을 직접 언급하지 않고
-    관련 키워드·기능·선호도만 서술하도록 지시.
+    Include the target item's title as a hint in the prompt.
+    The generated query/preference text should not directly name the title,
+    but only describe related keywords, features, and preferences.
     """
     title = get_item_title(item_metadata, item_id)
 
@@ -181,14 +181,14 @@ def build_target_item_hint(
     return "\n".join(lines)
 
 
-# ─── 메인 ────────────────────────────────────────────────────────────────────
+# ─── Main ────────────────────────────────────────────────────────────────────
 
 def process_key_selection(args):
     data_name      = args.data_name
     model_dir_name = args.model_name.split("/")[-1]
 
-    # ranked_csv / retrieval_rank_csv / preselected_csv 는 상호 배타적으로 동작
-    # 우선순위: retrieval_rank_csv > ranked_csv > preselected_csv
+    # ranked_csv / retrieval_rank_csv / preselected_csv are mutually exclusive
+    # Priority: retrieval_rank_csv > ranked_csv > preselected_csv
     use_suffix = (
         args.item_suffix
         or bool(args.preselected_csv)
@@ -197,7 +197,7 @@ def process_key_selection(args):
     )
     use_target_guided = getattr(args, "target_guided", False)
 
-    # 출력 파일명
+    # Output filename
     suffix = ""
     if args.item_suffix:
         suffix += "_suffix"
@@ -237,14 +237,14 @@ def process_key_selection(args):
     elif args.preselected_csv:
         preselected_map = load_preselected_items(args.preselected_csv)
 
-    # 토크나이저: postfix 모드 또는 target_guided 모드에서 챗 템플릿 직접 적용
+    # Tokenizer: apply chat template directly in postfix mode or target_guided mode
     need_tokenizer = use_suffix or use_target_guided
     tokenizer = None
     if need_tokenizer:
         tokenizer = AutoTokenizer.from_pretrained(args.model_name)
         print(f"Tokenizer loaded: {args.model_name}")
 
-    # PromptGenerator (챗 템플릿은 직접 적용하므로 apply_chat_template=False)
+    # PromptGenerator (chat template is applied directly, so apply_chat_template=False)
     prompt_generator = PromptGenerator(
         item_metadata=item_metadata,
         data_name=data_name,
@@ -259,7 +259,7 @@ def process_key_selection(args):
         history_text_max_length=args.word_limit,
         use_reviews=args.use_reviews,
         days_filter=args.days,
-        apply_chat_template=not need_tokenizer,  # postfix/target_guided 모드에서는 직접 적용
+        apply_chat_template=not need_tokenizer,  # apply directly in postfix/target_guided mode
     )
 
     split_index = {"train": -3, "valid": -2, "test": -1}
@@ -268,7 +268,7 @@ def process_key_selection(args):
     prompts          = []
     user_ids         = []
     target_item_ids  = []
-    postfix_item_ids = []   # None이면 postfix 없음
+    postfix_item_ids = []   # None means no postfix
 
     for user_id, reviews in tqdm(user2reviews.items(), desc="Building prompts"):
         target_item_id = int(reviews[index]["item_id"])
@@ -278,14 +278,14 @@ def process_key_selection(args):
         history_item_ids = [int(r["item_id"]) for r in history_reviews]
         assert len(history_item_ids) > 0, f"Empty history for user {user_id}"
 
-        # 기본 히스토리 텍스트
+        # Base history text
         history_text = prompt_generator.generate_prompt(
             item_ids=history_item_ids,
             user_id=user_id,
         )
 
         if use_target_guided:
-            # target_guided 모드: 타겟 아이템 메타데이터를 힌트로 삽입 후 챗 템플릿 적용
+            # target_guided mode: insert target item metadata as hint then apply chat template
             hint = build_target_item_hint(item_metadata, target_item_id, data_name)
             guided_user_text = history_text + "\n\n" + hint
             chat_str = apply_chat_template(tokenizer, guided_user_text)
@@ -294,13 +294,13 @@ def process_key_selection(args):
             target_item_ids.append(target_item_id)
             postfix_item_ids.append(None)
         elif use_suffix:
-            # 챗 템플릿 적용 → 문자열 끝에 아이템 타이틀 postfix
+            # Apply chat template → append item title postfix at end of string
             chat_str = apply_chat_template(tokenizer, history_text)
 
             if preselected_map:
-                # preselected_csv/retrieval_rank_csv 제공 시: 유저당 1개 프롬프트
+                # When preselected_csv/retrieval_rank_csv is provided: 1 prompt per user
                 presel_id = preselected_map.get(user_id)
-                # map에 없는 유저(rank 초과로 필터링된 유저 등)는 skip
+                # Skip users not in the map (e.g., filtered out by rank threshold)
                 if presel_id is None:
                     continue
                 title = get_item_title(item_metadata, presel_id)
@@ -309,7 +309,7 @@ def process_key_selection(args):
                 target_item_ids.append(target_item_id)
                 postfix_item_ids.append(presel_id)
             else:
-                # --item_suffix: 히스토리 아이템 N개 → N개 프롬프트
+                # --item_suffix: N history items → N prompts
                 for item_id in history_item_ids:
                     title = get_item_title(item_metadata, item_id)
                     prompts.append(chat_str + f"<key_item>{title}</key_item>")
@@ -317,22 +317,22 @@ def process_key_selection(args):
                     target_item_ids.append(target_item_id)
                     postfix_item_ids.append(item_id)
         else:
-            # 기본 모드: LLMGenerator가 챗 템플릿 적용
+            # Default mode: LLMGenerator applies chat template
             prompts.append(history_text)
             user_ids.append(user_id)
             target_item_ids.append(target_item_id)
             postfix_item_ids.append(None)
 
-    # 프롬프트 샘플 출력
+    # Print prompt samples
     sample_idx = [i for i in [0, min(10, len(prompts)-1), min(20, len(prompts)-1)]
                   if i < len(prompts)]
     print("\n--- Prompt samples ---")
     for i in sample_idx:
         print(f"[index {i}]\n{prompts[i]}\n{'-'*60}")
 
-    # postfix 모드: base(챗 템플릿만) vs 최종(+postfix) 비교 출력
+    # postfix mode: compare base (chat template only) vs final (+postfix)
     if use_suffix and prompts:
-        print("\n--- item_suffix 적용 예시 ---")
+        print("\n--- item_suffix example ---")
         i = sample_idx[0]
         uid = user_ids[i]
         h_ids = [int(r["item_id"])
@@ -341,26 +341,26 @@ def process_key_selection(args):
         chat_base = apply_chat_template(tokenizer, base_text)
         postfix_title = get_item_title(item_metadata, postfix_item_ids[i]) \
                         if postfix_item_ids[i] else "(none)"
-        print(f"[챗 템플릿 적용 후 (base)]\n{chat_base}")
-        print(f"\n[postfix 타이틀] '{postfix_title}'")
-        print(f"\n[최종 prompt]\n{prompts[i]}")
+        print(f"[After chat template (base)]\n{chat_base}")
+        print(f"\n[postfix title] '{postfix_title}'")
+        print(f"\n[final prompt]\n{prompts[i]}")
         print("=" * 60)
 
-    # target_guided 모드: 힌트 삽입 후 챗 템플릿 적용 예시 출력
+    # target_guided mode: print example of hint insertion followed by chat template
     if use_target_guided and prompts:
-        print("\n--- target_guided 적용 예시 ---")
+        print("\n--- target_guided example ---")
         i = sample_idx[0]
         uid = user_ids[i]
         tid = target_item_ids[i]
         h_ids = [int(r["item_id"])
                  for r in user2reviews[uid][index - args.history_limit : index]]
         hint = build_target_item_hint(item_metadata, tid, data_name)
-        print(f"[타겟 아이템 타이틀] '{get_item_title(item_metadata, tid)}'")
-        print(f"\n[삽입된 힌트]\n{hint}")
-        print(f"\n[최종 prompt]\n{prompts[i]}")
+        print(f"[Target item title] '{get_item_title(item_metadata, tid)}'")
+        print(f"\n[Inserted hint]\n{hint}")
+        print(f"\n[final prompt]\n{prompts[i]}")
         print("=" * 60)
 
-    # 생성
+    # Generate
     n_samples = getattr(args, 'n_samples', 1)
     llm_generator = LLMGenerator(args)
     responses, token_nums = llm_generator.generate_response(
@@ -369,8 +369,8 @@ def process_key_selection(args):
         n_samples=n_samples,
     )
 
-    # n_samples==1 이면 단일 문자열 리스트, >1 이면 리스트의 리스트
-    # 통일을 위해 항상 list[list[str]] 형태로 변환
+    # When n_samples==1 it is a flat list of strings; when >1, a list of lists.
+    # Normalize to always list[list[str]]
     if n_samples == 1:
         responses_nested = [[r] for r in responses]
     else:
@@ -381,7 +381,7 @@ def process_key_selection(args):
         for s_idx, r in enumerate(responses_nested[i]):
             print(f"[index {i}, sample {s_idx}]\n{r}\n{'-'*60}")
 
-    # 결과 저장 (n_samples > 1이면 유저당 N행)
+    # Save results (N rows per user when n_samples > 1)
     rows = []
     for prompt, user_id, target_item_id, postfix_id, sample_responses in zip(
         prompts, user_ids, target_item_ids, postfix_item_ids, responses_nested
@@ -448,53 +448,53 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--raw_prompt", action="store_true",
-        help="LLMGenerator에서 챗 템플릿을 적용하지 않고 프롬프트를 그대로 사용."
+        help="Use prompts as-is in LLMGenerator without applying the chat template."
     )
     parser.add_argument(
         "--n_samples", type=int, default=1,
-        help="프롬프트당 생성할 샘플 수 (vLLM SamplingParams n). 결과는 단일 CSV로 저장."
+        help="Number of samples to generate per prompt (vLLM SamplingParams n). Results saved to a single CSV."
     )
     parser.add_argument(
         "--item_suffix", action="store_true",
         help=(
-            "챗 템플릿 적용 후 히스토리 아이템 타이틀을 postfix로 붙여 생성. "
-            "히스토리 아이템 N개 → 유저당 N개 프롬프트."
+            "After applying the chat template, append history item titles as postfix. "
+            "N history items → N prompts per user."
         ),
     )
     parser.add_argument(
         "--preselected_csv", type=str, default=None,
         help=(
-            "user_id, selected_item_id 컬럼을 가진 CSV 경로. "
-            "해당 아이템 타이틀을 챗 템플릿 이후 postfix로 사용 (유저당 1개 프롬프트)."
+            "Path to a CSV with user_id and selected_item_id columns. "
+            "The item title is used as postfix after the chat template (1 prompt per user)."
         ),
     )
     parser.add_argument(
         "--ranked_csv", type=str, default=None,
         help=(
-            "eval_key_selection.py 가 생성한 ranked CSV 경로 "
-            "(user_id, postfix_item_id, rank 컬럼 필요). "
-            "유저별 rank 최소 postfix_item_id 를 자동 선정하여 suffix로 사용."
+            "Path to the ranked CSV generated by eval_key_selection.py "
+            "(requires user_id, postfix_item_id, rank columns). "
+            "Automatically selects the postfix_item_id with the lowest rank per user as suffix."
         ),
     )
     parser.add_argument(
         "--retrieval_rank_csv", type=str, default=None,
         help=(
-            "find_trigger_items_from_sequential.py (mode=rank) 가 생성한 CSV 경로 "
-            "(user_id, target_item_id, rank, best_rank_item_id 컬럼 필요). "
-            "--retrieval_rank_threshold 이하인 유저만 선택하고 "
-            "best_rank_item_id 를 postfix로 사용."
+            "Path to the CSV generated by find_trigger_items_from_sequential.py (mode=rank) "
+            "(requires user_id, target_item_id, rank, best_rank_item_id columns). "
+            "Only users with rank <= --retrieval_rank_threshold are selected, "
+            "and best_rank_item_id is used as postfix."
         ),
     )
     parser.add_argument(
         "--retrieval_rank_threshold", type=int, default=100,
-        help="--retrieval_rank_csv 사용 시 포함할 최대 rank 값 (default: 100).",
+        help="Maximum rank value to include when using --retrieval_rank_csv (default: 100).",
     )
     parser.add_argument(
         "--target_guided", action="store_true",
         help=(
-            "타겟(정답) 아이템의 category/brand/description을 힌트로 유저 프롬프트에 삽입하여 생성. "
-            "타이틀은 포함하지 않아 직접 정답을 노출하지 않음. "
-            "모델은 해당 타겟 아이템을 추천할 수 있는 키 아이템과 유저 선호도 텍스트를 생성."
+            "Insert the target (ground-truth) item's category/brand/description as a hint into the user prompt. "
+            "The title is excluded so the correct answer is not directly revealed. "
+            "The model generates a key item and user preference text that can recommend the target item."
         ),
     )
 

@@ -511,7 +511,7 @@ def main():
     """Main rejection sampling function"""
     args = parse_arguments()
     
-    # Seed 설정
+    # Set seed
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)

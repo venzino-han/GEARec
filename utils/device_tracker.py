@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Device Tracker - GPU 사용 현황을 추적하는 유틸리티
-각 run이 어떤 device에서 실행 중인지 추적하고 관리합니다.
+Device Tracker - Utility for tracking GPU usage status
+Tracks and manages which device each run is executing on.
 """
 
 import argparse
@@ -16,15 +16,15 @@ class DeviceTracker:
     def __init__(self, tracking_file="device_status.json"):
         """
         Args:
-            tracking_file: device 상태를 저장할 파일 경로
+            tracking_file: file path to save device status
         """
-        # rl4rec 프로젝트 루트 디렉토리 찾기
+        # Find rl4rec project root directory
         script_dir = Path(__file__).parent
         project_root = script_dir.parent
         self.tracking_file = project_root / tracking_file
         
     def _load_status(self):
-        """현재 device 상태를 로드"""
+        """Load current device status"""
         if not self.tracking_file.exists():
             return {}
         
@@ -35,8 +35,8 @@ class DeviceTracker:
             return {}
     
     def _save_status(self, status):
-        """device 상태를 저장"""
-        # 디렉토리가 없으면 생성
+        """Save device status"""
+        # Create directory if it does not exist
         self.tracking_file.parent.mkdir(parents=True, exist_ok=True)
         
         with open(self.tracking_file, 'w', encoding='utf-8') as f:
@@ -44,11 +44,11 @@ class DeviceTracker:
     
     def allocate(self, device_id, run_name):
         """
-        device를 특정 run에 할당
-        
+        Allocate a device to a specific run
+
         Args:
             device_id: GPU device ID (0, 1, 2, ...)
-            run_name: 실행할 run의 이름
+            run_name: name of the run to execute
         """
         status = self._load_status()
         device_key = f"cuda:{device_id}"
@@ -65,8 +65,8 @@ class DeviceTracker:
     
     def free(self, device_id):
         """
-        device를 free 상태로 변경
-        
+        Set a device to free status
+
         Args:
             device_id: GPU device ID (0, 1, 2, ...)
         """
@@ -97,7 +97,7 @@ class DeviceTracker:
         print(f"✅ Device {device_id} is now free (previous run: {old_run if device_key in status else 'none'})")
     
     def show(self):
-        """현재 모든 device의 상태를 표시"""
+        """Display current status of all devices"""
         status = self._load_status()
         
         if not status:
@@ -129,7 +129,7 @@ class DeviceTracker:
         print("\n" + "="*80 + "\n")
     
     def show_simple(self):
-        """간단한 형식으로 device 상태 표시 (스크립트 실행 전/후에 사용)"""
+        """Display device status in simple format (use before/after script execution)"""
         status = self._load_status()
         
         if not status:
@@ -157,19 +157,19 @@ def main():
     
     subparsers = parser.add_subparsers(dest='command', help='Commands')
     
-    # allocate 명령
+    # allocate command
     allocate_parser = subparsers.add_parser('allocate', help='Allocate device to a run')
     allocate_parser.add_argument('device_id', type=int, help='GPU device ID (e.g., 0, 1, 2)')
     allocate_parser.add_argument('run_name', type=str, help='Name of the run')
     
-    # free 명령
+    # free command
     free_parser = subparsers.add_parser('free', help='Free a device')
     free_parser.add_argument('device_id', type=int, help='GPU device ID to free')
     
-    # show 명령
+    # show command
     subparsers.add_parser('show', help='Show all device statuses')
     
-    # show-simple 명령
+    # show-simple command
     subparsers.add_parser('show-simple', help='Show device statuses in simple format')
     
     args = parser.parse_args()

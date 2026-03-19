@@ -18,16 +18,16 @@ from utils.reward_function import calculate_ndcg, calculate_hit_rate, extract_qu
 
 def get_last_item_text(dataset, item_metadata, use_brand=True, use_category=True):
     """
-    각 사용자의 마지막 구매 아이템 정보를 텍스트로 변환
-    
+    Convert the last purchased item information for each user into text.
+
     Args:
-        dataset: RecommendationDataset 인스턴스
-        item_metadata: 아이템 메타데이터
-        use_brand: 브랜드 포함 여부
-        use_category: 카테고리 포함 여부
-    
+        dataset: RecommendationDataset instance
+        item_metadata: item metadata
+        use_brand: whether to include brand
+        use_category: whether to include category
+
     Returns:
-        last_item_texts: 각 샘플의 마지막 아이템 텍스트 리스트
+        last_item_texts: list of last item texts for each sample
     """
     last_item_texts = []
     
@@ -36,7 +36,7 @@ def get_last_item_text(dataset, item_metadata, use_brand=True, use_category=True
         history = data.get('history', [])
         
         if len(history) > 0:
-            last_item_id = history[-1]  # 마지막 아이템
+            last_item_id = history[-1]  # last item
             item_info = item_metadata.get(last_item_id, {})
             
             text_parts = []
@@ -66,41 +66,41 @@ def get_last_item_text(dataset, item_metadata, use_brand=True, use_category=True
 
 class RecommendationEvaluator:
     """
-    추천 모델 평가를 위한 클래스
-    vLLM을 사용하여 텍스트 생성 및 임베딩 기반 검색 수행
+    Class for evaluating recommendation models.
+    Performs text generation and embedding-based retrieval using vLLM.
     """
-    
+
     def __init__(self, args, checkpoint_dir, item_metadata=None):
         """
         Args:
-            args: 학습 설정 파라미터
-            checkpoint_dir: 평가할 모델 체크포인트 경로
-            item_metadata: 아이템 메타데이터 (prepend_last_item 사용 시 필요)
+            args: training configuration parameters
+            checkpoint_dir: path to model checkpoint for evaluation
+            item_metadata: item metadata (required when prepend_last_item is used)
         """
         self.args = args
         self.checkpoint_dir = checkpoint_dir
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.item_metadata = item_metadata
         
-        # vLLM 모델들 (lazy loading)
+        # vLLM models (lazy loading)
         self.llm = None
         self.emb_llm = None
         self.item_embeddings = None
-        self.use_sentence_transformers = False  # SentenceTransformer 사용 여부
-        
-        # 아이템 인기도 및 Novelty 계산용
+        self.use_sentence_transformers = False  # whether to use SentenceTransformer
+
+        # For item popularity and Novelty computation
         self.item_popularity = None
         self.item_novelty = None
-        self.hot_items = None  # 상위 20% 인기 아이템 세트
-        self.cold_items = None  # 나머지 80% 아이템 세트
+        self.hot_items = None  # top 20% popular items set
+        self.cold_items = None  # remaining 80% items set
 
         self._load_item_embeddings()
         self._compute_item_popularity()
-        # Cold/Hot 구분
+        # Cold/Hot classification
         
         
     def _load_generation_model(self):
-        """텍스트 생성을 위한 vLLM 모델 로드"""
+        """Load vLLM model for text generation"""
         if hasattr(self.args, 'zeroshot_evaluation') and self.args.zeroshot_evaluation:
             print("🤖 Loading model with vLLM for zeroshot evaluation...")
             self.sampling_params = SamplingParams(
@@ -138,20 +138,20 @@ class RecommendationEvaluator:
             )
     
     def _load_embedding_model(self):
-        """임베딩 계산을 위한 vLLM 또는 SentenceTransformer 모델 로드"""
+        """Load vLLM or SentenceTransformer model for embedding computation"""
         if self.emb_llm is None:
             print("🔍 Loading embedding model for retrieval...")
             emb_model_name = getattr(self.args, 'emb_model_name', 'mixedbread-ai/mxbai-embed-large-v1')
             use_sentence_transformers = getattr(self.args, 'use_sentence_transformers', False)
-            
-            # SentenceTransformer 사용 조건 체크
+
+            # Check conditions for using SentenceTransformer
             if use_sentence_transformers:
                 print("🔍 Using SentenceTransformer for embedding...")
                 self.emb_llm = SentenceTransformer(emb_model_name)
                 self.use_sentence_transformers = True
             else:
                 print("🔍 Using vLLM for embedding...")
-                # Pooling 파라미터 설정
+                # Set pooling parameters
                 self.pooling_params = PoolingParams(
                     truncate_prompt_tokens=self.args.eval_emb_max_length,
                     task="embed",
@@ -170,7 +170,7 @@ class RecommendationEvaluator:
                 self.use_sentence_transformers = False
     
     def _load_item_embeddings(self):
-        """아이템 임베딩 로드"""
+        """Load item embeddings"""
         if self.item_embeddings is None:
             print("📦 Loading item embeddings...")
             emb_model_name = getattr(self.args, 'emb_model_name', 'mixedbread-ai/mxbai-embed-large-v1')
@@ -188,107 +188,107 @@ class RecommendationEvaluator:
     
     def _compute_item_popularity(self):
         """
-        아이템 인기도 및 Novelty 계산 (캐싱 지원)
-        Hot/Cold 아이템 구분: 상위 20% 인기도 = Hot, 나머지 80% = Cold
-        
-        train set의 sequential_data.txt 파일을 읽어서 계산
-        
-        3개의 파일로 분리 저장:
-        - item_popularity.npy: numpy 배열
-        - item_novelty.npy: numpy 배열
+        Compute item popularity and Novelty (with caching support).
+        Hot/Cold item split: top 20% popularity = Hot, remaining 80% = Cold.
+
+        Reads from train set's sequential_data.txt file.
+
+        Saved as 3 separate files:
+        - item_popularity.npy: numpy array
+        - item_novelty.npy: numpy array
         - item_cold_hot.json: {"cold_items": [...], "hot_items": [...]}
         """
         if self.item_popularity is None:
-            # 캐시 파일 경로
+            # Cache file paths
             cache_dir = Path(f"./data/{self.args.data_name}")
             popularity_file = cache_dir / "item_popularity.npy"
             novelty_file = cache_dir / "item_novelty.npy"
             cold_hot_file = cache_dir / "item_cold_hot.json"
-            
-            # 캐시 파일이 모두 존재하면 로드
+
+            # Load if all cache files exist
             if popularity_file.exists() and novelty_file.exists() and cold_hot_file.exists():
                 print(f"📦 Loading cached item data from {cache_dir}...")
                 try:
-                    # Popularity 로드 (.npy 파일)
+                    # Load popularity (.npy file)
                     self.item_popularity = np.load(popularity_file)
-                    
-                    # Novelty 로드 (.npy 파일)
+
+                    # Load novelty (.npy file)
                     self.item_novelty = np.load(novelty_file)
-                    
-                    # Cold/Hot 로드 (JSON 파일)
+
+                    # Load Cold/Hot (JSON file)
                     with open(cold_hot_file, 'r') as f:
                         cold_hot_data = json.load(f)
-                    
-                    # Cold/Hot items를 set으로 변환
+
+                    # Convert Cold/Hot items to sets
                     self.cold_items = set(cold_hot_data['cold_items'])
                     self.hot_items = set(cold_hot_data['hot_items'])
-                    
+
                     max_pop = self.item_popularity.max()
                     print(f"✓ Item data loaded from cache. Max popularity: {max_pop:.4f}, Mean novelty: {self.item_novelty.mean():.4f}")
                     print(f"✓ Hot items: {len(self.hot_items)}, Cold items: {len(self.cold_items)}")
                     return
                 except Exception as e:
                     print(f"⚠️  Failed to load cache: {e}. Computing from scratch...")
-            
-            # 캐시가 없으면 계산
+
+            # Compute if no cache
             print("📊 Computing item popularity and novelty from sequential_data.txt...")
-            
-            # 전체 아이템 수
+
+            # Total number of items
             num_items = self.item_embeddings.shape[0]
-            
-            # sequential_data.txt 파일 읽기
+
+            # Read sequential_data.txt file
             sequential_file = Path(f"./data/{self.args.data_name}/sequential_data.txt")
-            # 각 아이템의 출현 횟수 계산
+            # Count occurrences for each item
             item_counts = np.zeros(num_items + 1, dtype=np.int32)  # 1-indexed
-            
+
             with open(sequential_file, 'r') as f:
                 for line in f:
                     parts = line.strip().split()
-                    # 첫 번째는 user_id, 나머지는 아이템 시퀀스 (history + target)
+                    # First element is user_id, rest is item sequence (history + target)
                     items = [int(x) for x in parts[1:-2]]
-                    
-                    # 모든 아이템의 출현 횟수 카운트
+
+                    # Count occurrences of all items
                     for item_id in items:
                         item_counts[item_id] += 1
-            
+
             print(f"✓ Loaded {sequential_file}, total items processed")
-            
-            # 인기도 저장
+
+            # Store popularity
             self.item_popularity = (item_counts+1) / item_counts.sum()
             max_count = item_counts.max()
             self.item_novelty = -np.log(self.item_popularity)
-            
-            # Hot/Cold 아이템 구분: 상위 20% 인기도를 기준으로
-            # 인기도를 기준으로 정렬하여 상위 20% threshold 계산
-            sorted_counts = np.sort(item_counts)[::-1]  # 내림차순 정렬
+
+            # Hot/Cold split: based on top 20% popularity threshold
+            # Sort by popularity and compute top 20% threshold
+            sorted_counts = np.sort(item_counts)[::-1]  # descending order
             threshold_idx = int(len(sorted_counts) * 0.2)
             threshold = sorted_counts[threshold_idx] if threshold_idx < len(sorted_counts) else 0
-            
-            # Hot items: 인기도가 threshold 이상인 아이템 (1-indexed)
-            # Cold items: 인기도가 threshold 미만인 아이템 (1-indexed)
+
+            # Hot items: items with popularity >= threshold (1-indexed)
+            # Cold items: items with popularity < threshold (1-indexed)
             hot_mask = (item_counts >= threshold) & (np.arange(len(item_counts)) > 0)
             cold_mask = (item_counts < threshold) & (np.arange(len(item_counts)) > 0)
-            
+
             self.hot_items = set(np.where(hot_mask)[0].tolist())
             self.cold_items = set(np.where(cold_mask)[0].tolist())
-            
+
             print(f"✓ Item popularity computed. Max count: {max_count}, Mean novelty: {self.item_novelty.mean():.4f}")
             print(f"✓ Hot items (top 20%): {len(self.hot_items)}, Cold items (80%): {len(self.cold_items)}, Threshold: {threshold}")
-            
-            # 캐시 파일에 저장 (3개의 파일로 분리)
+
+            # Save to cache files (3 separate files)
             try:
-                # 캐시 디렉토리 생성
+                # Create cache directory
                 cache_dir.mkdir(parents=True, exist_ok=True)
-                
-                # 1. Popularity 저장 (.npy 파일)
+
+                # 1. Save popularity (.npy file)
                 np.save(popularity_file, self.item_popularity)
                 print(f"💾 Item popularity cached to {popularity_file}")
-                
-                # 2. Novelty 저장 (.npy 파일)
+
+                # 2. Save novelty (.npy file)
                 np.save(novelty_file, self.item_novelty)
                 print(f"💾 Item novelty cached to {novelty_file}")
-                
-                # 3. Cold/Hot 저장 (JSON 파일)
+
+                # 3. Save Cold/Hot (JSON file)
                 cold_hot_data = {
                     'cold_items': list(self.cold_items),
                     'hot_items': list(self.hot_items),
@@ -305,24 +305,24 @@ class RecommendationEvaluator:
     
     def _identify_cold_warm_items(self, targets):
         """
-        Cold/Hot 타겟 아이템 구분
-        전체 train 데이터 기반 인기도로 상위 20% = Hot, 나머지 80% = Cold
-        
+        Classify target items as Cold/Hot.
+        Based on train data popularity: top 20% = Hot, remaining 80% = Cold.
+
         Args:
-            targets: 타겟 아이템 ID 리스트
-        
+            targets: list of target item IDs
+
         Returns:
-            cold_indices: Cold 타겟의 인덱스 리스트
-            hot_indices: Hot 타겟의 인덱스 리스트
+            cold_indices: list of Cold target indices
+            hot_indices: list of Hot target indices
         """
         if self.hot_items is None or self.cold_items is None:
             raise ValueError("Hot/Cold items not computed. Call _compute_item_popularity first.")
-        
+
         cold_indices = []
         hot_indices = []
-        
+
         for i, target in enumerate(targets):
-            # 타겟 아이템이 hot_items 세트에 있으면 hot, 없으면 cold
+            # If target item is in hot_items set -> hot, otherwise -> cold
             if target in self.hot_items:
                 hot_indices.append(i)
             else:
@@ -332,17 +332,17 @@ class RecommendationEvaluator:
     
     def generate_all_texts(self, prompts):
         """
-        모든 프롬프트에 대해 텍스트 생성
-        
+        Generate text for all prompts.
+
         Args:
-            prompts: 생성할 프롬프트 리스트
-            batch_size: 배치 크기 (None이면 args.eval_batch_size 사용)
+            prompts: list of prompts to generate
+            batch_size: batch size (uses args.eval_batch_size if None)
         
         Returns:
-            generated_texts: 생성된 텍스트 리스트
+            generated_texts: list of generated texts
         """
         self._load_generation_model()
-        # 샘플링 파라미터 설정
+        # Sampling parameters are already set
         print(f"🚀 Generating responses for {len(prompts)} prompts...")
         outputs = self.llm.generate(prompts, self.sampling_params)
         generated_texts = [output.outputs[0].text for output in outputs]
@@ -350,46 +350,46 @@ class RecommendationEvaluator:
     
     def compute_embeddings(self, texts):
         """
-        텍스트들에 대한 임베딩을 한번에 계산
-        <query> 태그가 있는 경우 태그 내부의 텍스트만 사용
-        
+        Compute embeddings for all texts at once.
+        If a <query> tag is present, only the text inside the tag is used.
+
         Args:
-            texts: 임베딩할 텍스트 리스트
-            batch_size: 배치 크기 (None이면 args.eval_emb_batch_size 사용)
-        
+            texts: list of texts to embed
+            batch_size: batch size (uses args.eval_emb_batch_size if None)
+
         Returns:
-            query_embeddings: 정규화된 쿼리 임베딩 [num_texts, emb_dim]
+            query_embeddings: normalized query embeddings [num_texts, emb_dim]
         """
         self._load_embedding_model()
-        
-        # <query> 태그가 있으면 추출, 없으면 원본 사용
+
+        # Extract <query> tag content if present, otherwise use original text
         processed_texts = [extract_query_from_tags(text, tag="query") for text in texts]
-        
+
         print(f"🔍 Computing embeddings for {len(processed_texts)} texts...")
-        
+
         if self.use_sentence_transformers:
-            # SentenceTransformer 사용
+            # Use SentenceTransformer
             print("🔍 Using SentenceTransformer encode...")
             query_embeddings = self.emb_llm.encode(
-                processed_texts, 
-                batch_size=self.args.eval_emb_batch_size, 
-                show_progress_bar=True, 
+                processed_texts,
+                batch_size=self.args.eval_emb_batch_size,
+                show_progress_bar=True,
                 convert_to_tensor=True
             )
 
         else:
-            # vLLM 사용
+            # Use vLLM
             # add cls token
             processed_texts_with_cls = [f"[CLS] {text}" for text in processed_texts]
 
-            # Embedding 계산
+            # Compute embeddings
             emb_outputs = self.emb_llm.encode(
                 prompts=processed_texts_with_cls,
                 pooling_task="embed",
                 pooling_params=self.pooling_params,
                 use_tqdm=True,
             )
-            # Query embeddings 추출
+            # Extract query embeddings
             embeddings_list = [
                 torch.as_tensor(out.outputs.data, dtype=torch.float32, device=self.device)
                 for out in emb_outputs
@@ -400,28 +400,28 @@ class RecommendationEvaluator:
     
     def compute_retrieval_metrics(self, query_embeddings, targets, histories, ks=[5, 10, 20]):
         """
-        검색 메트릭 계산 (배치별 처리)
-        Cold/Hot 구분 및 Novelty 메트릭 포함
-        - Cold: 인기도 하위 80% 아이템
-        - Hot: 인기도 상위 20% 아이템
-        
+        Compute retrieval metrics (processed in batches).
+        Includes Cold/Hot split and Novelty metrics.
+        - Cold: bottom 80% popularity items
+        - Hot: top 20% popularity items
+
         Args:
-            query_embeddings: 쿼리 임베딩 [num_queries, emb_dim]
-            targets: 타겟 아이템 ID 리스트
-            histories: 히스토리 아이템 ID 리스트의 리스트
-            ks: 평가할 k 값들
-        
+            query_embeddings: query embeddings [num_queries, emb_dim]
+            targets: list of target item IDs
+            histories: list of lists of history item IDs
+            ks: k values to evaluate
+
         Returns:
-            metrics: 메트릭 딕셔너리
-            rank_info: 각 샘플의 rank 및 score 정보 리스트
+            metrics: metrics dictionary
+            rank_info: list of rank and score info for each sample
         """
         cold_indices, hot_indices = self._identify_cold_warm_items(targets)
         print(f"  Cold targets: {len(cold_indices)}, Hot targets: {len(hot_indices)}")
         self.cold_indices = cold_indices
         self.hot_indices = hot_indices
         print(f"📊 Computing retrieval metrics...")
-        
-        # 메트릭 저장용 딕셔너리 초기화
+
+        # Initialize metrics storage dictionary
         metrics = {f'ndcg@{k}': [] for k in ks}
         metrics.update({f'hit@{k}': [] for k in ks})
         metrics.update({f'cold_ndcg@{k}': [] for k in ks})
@@ -430,11 +430,11 @@ class RecommendationEvaluator:
         metrics.update({f'hot_hit@{k}': [] for k in ks})
         metrics.update({f'novelty@{k}': [] for k in ks})
         metrics.update({f'novelty_hit@{k}': [] for k in ks})
-        
-        # Rank 정보 저장용 리스트
+
+        # List for storing rank information
         rank_info = []
-        
-        # 배치 크기 설정
+
+        # Set batch size
         batch_size = self.args.eval_batch_size
         num_queries = query_embeddings.shape[0]
         num_batches = (num_queries + batch_size - 1) // batch_size
@@ -445,30 +445,30 @@ class RecommendationEvaluator:
             start_idx = batch_idx * batch_size
             end_idx = min(start_idx + batch_size, num_queries)
             
-            # 배치 데이터 추출
+            # Extract batch data
             batch_query_emb = query_embeddings[start_idx:end_idx]
             batch_targets = targets[start_idx:end_idx]
             batch_histories = histories[start_idx:end_idx]
-            
-            # 전체 아이템과의 유사도 계산
+
+            # Compute similarity with all items
             batch_scores = torch.matmul(batch_query_emb, self.item_embeddings.T)  # [batch_size, num_items]
-            
-            # 과거 구매 아이템 제외
+
+            # Exclude previously purchased items
             for i in range(len(batch_targets)):
                 history_indices = [idx for idx in batch_histories[i] if idx != batch_targets[i]]
                 if history_indices:
                     batch_scores[i, history_indices] = -float('inf')
-            
-            # 각 샘플의 rank 계산 및 Novelty 메트릭
+
+            # Compute rank and Novelty metrics for each sample
             for i in range(len(batch_targets)):
                 global_idx = start_idx + i
                 target_item = batch_targets[i]
                 target_score = batch_scores[i, target_item].item()
-                
-                # 타겟 아이템보다 높은 점수를 가진 아이템의 개수 = rank - 1
+
+                # Number of items with a higher score than target = rank - 1
                 rank = (batch_scores[i] > target_score).sum().item() + 1
-                
-                # Cold/Warm 구분
+
+                # Cold/Warm classification
                 is_cold = global_idx in self.cold_indices
                 
                 rank_info.append({
@@ -479,9 +479,9 @@ class RecommendationEvaluator:
                     'target_novelty': float(self.item_novelty[target_item]),
                 })
             
-            # 각 k에 대해 메트릭 계산
+            # Compute metrics for each k
             for k in ks:
-                # NDCG 계산
+                # Compute NDCG
                 ndcg_scores = calculate_ndcg(
                     batch_scores,
                     batch_targets,
@@ -491,7 +491,7 @@ class RecommendationEvaluator:
                 )
                 metrics[f'ndcg@{k}'].extend(ndcg_scores.cpu().tolist())
                 
-                # Hit 계산
+                # Compute Hit
                 hit_scores = calculate_hit_rate(
                     batch_scores,
                     batch_targets,
@@ -501,7 +501,7 @@ class RecommendationEvaluator:
                 )
                 metrics[f'hit@{k}'].extend(hit_scores.cpu().tolist())
                 
-                # Cold/Hot 별 메트릭 계산
+                # Compute metrics by Cold/Hot
                 for i in range(len(batch_targets)):
                     global_idx = start_idx + i
                     is_cold = global_idx in self.cold_indices
@@ -513,19 +513,19 @@ class RecommendationEvaluator:
                         metrics[f'hot_ndcg@{k}'].append(ndcg_scores[i].item())
                         metrics[f'hot_hit@{k}'].append(hit_scores[i].item())
                 
-                # Novelty 메트릭 계산
+                # Compute Novelty metrics
                 for i in range(len(batch_targets)):
                     global_idx = start_idx + i
                     target_item = batch_targets[i]
-                    
-                    # Top-k 아이템 추출
+
+                    # Extract Top-k items
                     top_k_items = torch.topk(batch_scores[i], k).indices.cpu().numpy()
-                    
-                    # Top-k 아이템들의 평균 Novelty
+
+                    # Average Novelty of Top-k items
                     avg_novelty = np.mean([self.item_novelty[item] for item in top_k_items])
                     metrics[f'novelty@{k}'].append(avg_novelty)
-                    
-                    # Hit@k에 타겟 아이템의 Novelty를 적용
+
+                    # Apply target item's Novelty to Hit@k
                     hit_value = hit_scores[i].item()
                     target_novelty = self.item_novelty[target_item]
                     novelty_hit = hit_value * target_novelty
@@ -535,26 +535,26 @@ class RecommendationEvaluator:
     
     def evaluate(self, dataset, split="test", save_log=True, pre_generated_texts=None):
         """
-        전체 평가 파이프라인 실행
-        
+        Run the full evaluation pipeline.
+
         Args:
-            dataset: 평가할 데이터셋
-            split: 데이터셋 split 이름 ("test", "val" 등)
-            save_log: 로그 파일 저장 여부
-            pre_generated_texts: 미리 생성된 텍스트 리스트 (선택사항)
-        
+            dataset: dataset to evaluate
+            split: dataset split name ("test", "val", etc.)
+            save_log: whether to save log file
+            pre_generated_texts: pre-generated texts list (optional)
+
         Returns:
-            results: 평가 결과 딕셔너리
-        
+            results: evaluation results dictionary
+
         Note:
-            - args.prepend_last_item이 True이고 item_metadata가 제공된 경우,
-              마지막 구매 아이템 정보를 생성된 텍스트 앞에 추가합니다.
+            - If args.prepend_last_item is True and item_metadata is provided,
+              the last purchased item information is prepended to the generated texts.
         """
         print(f"\n{'='*80}")
         print(f"📊 Final Evaluation on {split.upper()} Set")
         print(f"{'='*80}")
-        
-        # 1. 데이터 수집
+
+        # 1. Collect data
         print("📝 Collecting data...")
         all_prompts = []
         all_targets = []
@@ -574,7 +574,7 @@ class RecommendationEvaluator:
             all_histories = all_histories[:self.args.eval_samples]
             all_user_ids = all_user_ids[:self.args.eval_samples]
         
-        # 2. 텍스트 생성 (모든 프롬프트에 대해)
+        # 2. Generate text (for all prompts)
         if pre_generated_texts is not None:
             print("📄 Using pre-generated texts from CSV...")
             generated_texts = pre_generated_texts[:len(all_prompts)]
@@ -584,8 +584,8 @@ class RecommendationEvaluator:
         else:
             generated_texts = self.generate_all_texts(all_prompts)
 
-        # 생성 모델 즉시 정리 (메모리 절약)
-        if pre_generated_texts is None:  # 생성 모델을 사용한 경우에만 정리
+        # Immediately clean up generation model (save memory)
+        if pre_generated_texts is None:  # Only clean up if generation model was used
             print("\n🧹 Cleaning up generation model...")
             if self.llm is not None:
                 try:
@@ -601,20 +601,20 @@ class RecommendationEvaluator:
             if torch.cuda.is_available():
                 print(f"💾 GPU Memory after generation: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         
-        # 2.5. 마지막 아이템 prepend 옵션 처리
+        # 2.5. Handle prepend_last_item option
         if hasattr(self.args, 'prepend_last_item') and self.args.prepend_last_item:
             if self.item_metadata is None:
                 print("⚠️  Warning: prepend_last_item is enabled but item_metadata is not provided. Skipping prepending.")
             else:
                 print("📝 Prepending last purchased item to generated texts...")
                 last_item_texts = get_last_item_text(
-                    dataset, 
+                    dataset,
                     self.item_metadata,
                     use_brand=getattr(self.args, 'use_brand', True),
                     use_category=getattr(self.args, 'use_category', True)
                 )
-                
-                # 마지막 아이템 텍스트를 generated text 앞에 추가
+
+                # Prepend last item text to generated text
                 modified_texts = []
                 for last_item_text, generated_text in zip(last_item_texts, generated_texts):
                     if last_item_text:
@@ -622,11 +622,11 @@ class RecommendationEvaluator:
                     else:
                         modified_text = generated_text
                     modified_texts.append(modified_text)
-                
+
                 generated_texts = modified_texts
                 print(f"✓ Prepended last item to {len(generated_texts)} texts")
-                
-                # 샘플 출력
+
+                # Print sample
                 print("\n" + "="*80)
                 print("📝 Sample Modified Text (with last item prepended):")
                 print("="*80)
@@ -634,10 +634,10 @@ class RecommendationEvaluator:
                     print(generated_texts[0][:500] + "..." if len(generated_texts[0]) > 500 else generated_texts[0])
                     print("="*80)
         
-        # 3. 임베딩 계산 (모든 생성된 텍스트에 대해)
+        # 3. Compute embeddings (for all generated texts)
         query_embeddings = self.compute_embeddings(generated_texts)
-        
-        # 임베딩 모델도 정리 (메트릭 계산 전)
+
+        # Also clean up embedding model (before metric computation)
         print("\n🧹 Cleaning up embedding model...")
         if self.emb_llm is not None:
             try:
@@ -653,7 +653,7 @@ class RecommendationEvaluator:
         if torch.cuda.is_available():
             print(f"💾 GPU Memory after embedding: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         
-        # 4. 메트릭 계산
+        # 4. Compute metrics
         metrics, rank_info = self.compute_retrieval_metrics(
             query_embeddings, 
             all_targets, 
@@ -661,7 +661,7 @@ class RecommendationEvaluator:
             ks=[5, 10, 20]
         )
         
-        # 5. 샘플 출력 저장 (처음 3개)
+        # 5. Save sample outputs (first 3)
         sample_outputs = []
         num_samples = min(3, len(all_prompts))
         for i in range(num_samples):
@@ -672,30 +672,30 @@ class RecommendationEvaluator:
                 'history': all_histories[i]
             })
         
-        # 6. 결과 출력
+        # 6. Print results
         self._print_sample_outputs(sample_outputs)
         results = self._print_metrics(metrics, split)
         
-        # 7. 로그 파일 저장
+        # 7. Save log file
         if save_log:
             self._save_log_file(results, metrics, sample_outputs, split)
-            # CSV 파일 저장
+            # Save CSV file
             self._save_csv_file(
-                all_prompts, 
-                generated_texts, 
-                all_targets, 
+                all_prompts,
+                generated_texts,
+                all_targets,
                 all_histories,
                 all_user_ids,
-                rank_info, 
+                rank_info,
                 split
             )
-            # 마스터 로그 파일 저장
+            # Save master log file
             self._save_master_log(results, split)
         
         return results
     
     def _print_sample_outputs(self, sample_outputs):
-        """샘플 프롬프트와 생성 결과 출력"""
+        """Print sample prompts and generated results"""
         print(f"\n{'='*80}")
         print(f"📝 Sample Prompts and Generated Texts")
         print(f"{'='*80}")
@@ -706,7 +706,7 @@ class RecommendationEvaluator:
             print(f"Target Item ID: {sample['target']}")
             print(f"History Items: {sample['history']}")
             print(f"\n[Prompt]")
-            # 프롬프트가 길면 앞 300자만 출력
+            # Print only first 300 characters if prompt is long
             prompt_preview = sample['prompt'][:300] + "..." if len(sample['prompt']) > 300 else sample['prompt']
             print(prompt_preview)
             print(f"\n[Generated Text]")
@@ -714,14 +714,14 @@ class RecommendationEvaluator:
             print(f"{'─'*80}")
     
     def _print_metrics(self, metrics, split):
-        """메트릭 출력 및 평균 계산"""
+        """Print metrics and compute averages"""
         print(f"\n{'='*80}")
         print(f"📈 Final Evaluation Results ({split.upper()})")
         print(f"{'='*80}")
-        
+
         results = {}
-        
-        # 기본 메트릭
+
+        # Overall metrics
         print("\n[Overall Metrics]")
         for metric_name in ['hit@5', 'hit@10', 'hit@20', 'ndcg@5', 'ndcg@10', 'ndcg@20']:
             if metric_name in metrics and len(metrics[metric_name]) > 0:
@@ -729,7 +729,7 @@ class RecommendationEvaluator:
                 results[metric_name] = float(mean_val)
                 print(f"  {metric_name.upper()}: {mean_val:.4f}")
         
-        # Cold 메트릭
+        # Cold metrics
         print("\n[Cold Items Metrics (80%)]")
         for metric_name in ['cold_hit@5', 'cold_hit@10', 'cold_hit@20', 'cold_ndcg@5', 'cold_ndcg@10', 'cold_ndcg@20']:
             if metric_name in metrics and len(metrics[metric_name]) > 0:
@@ -740,7 +740,7 @@ class RecommendationEvaluator:
                 results[metric_name] = 0.0
                 print(f"  {metric_name.upper()}: N/A (no cold items)")
         
-        # Hot 메트릭
+        # Hot metrics
         print("\n[Hot Items Metrics (Top 20%)]")
         for metric_name in ['hot_hit@5', 'hot_hit@10', 'hot_hit@20', 'hot_ndcg@5', 'hot_ndcg@10', 'hot_ndcg@20']:
             if metric_name in metrics and len(metrics[metric_name]) > 0:
@@ -751,7 +751,7 @@ class RecommendationEvaluator:
                 results[metric_name] = 0.0
                 print(f"  {metric_name.upper()}: N/A (no hot items)")
         
-        # Novelty 메트릭
+        # Novelty metrics
         print("\n[Novelty Metrics]")
         for metric_name in ['novelty@5', 'novelty@10', 'novelty@20', 'novelty_hit@5', 'novelty_hit@10', 'novelty_hit@20']:
             if metric_name in metrics and len(metrics[metric_name]) > 0:
@@ -764,17 +764,17 @@ class RecommendationEvaluator:
         return results
     
     def _save_log_file(self, results, metrics, sample_outputs, split):
-        """평가 결과를 로그 파일로 저장"""
+        """Save evaluation results to a log file"""
         results_dir = Path("results")
         results_dir.mkdir(exist_ok=True)
-        
-        # 타임스탬프 추가
+
+        # Add timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_filename = f"{self.args.run_name}_{split}_eval.log"
         log_file = results_dir / log_filename
         
         with open(log_file, 'a') as f:
-            # 헤더
+            # Header
             f.write("="*80 + "\n")
             f.write(f"Evaluation Results - {split.upper()}\n")
             f.write(f"Run Name: {self.args.run_name}\n")
@@ -783,7 +783,7 @@ class RecommendationEvaluator:
             f.write(f"Timestamp: {timestamp}\n")
             f.write("="*80 + "\n\n")
             
-            # 메트릭 결과
+            # Metric results
             f.write("EVALUATION METRICS\n")
             f.write("-"*80 + "\n")
             
@@ -813,7 +813,7 @@ class RecommendationEvaluator:
             
             f.write("-"*80 + "\n\n")
             
-            # 샘플 출력
+            # Sample outputs
             f.write("SAMPLE PROMPTS AND GENERATED TEXTS\n")
             f.write("="*80 + "\n")
             for idx, sample in enumerate(sample_outputs, 1):
@@ -831,17 +831,17 @@ class RecommendationEvaluator:
     
     def _save_master_log(self, results, split):
         """
-        단일 마스터 로그 파일에 모든 성능 지표 기록
-        
+        Record all performance metrics to a single master log file.
+
         Args:
-            results: 메트릭 결과 딕셔너리
-            split: 데이터셋 split 이름
+            results: metrics result dictionary
+            split: dataset split name
         """
         results_dir = Path("results")
         results_dir.mkdir(exist_ok=True)
-        
+
         master_log_file = results_dir / f"0_{self.args.data_name}_master.log"
-        
+
         with open(master_log_file, 'a') as f:
             f.write("="*120 + "\n")
             f.write(f"Master Evaluation Log - {self.args.run_name}\n")
@@ -849,8 +849,8 @@ class RecommendationEvaluator:
             f.write(f"Dataset: {self.args.data_name}\n")
             f.write(f"Model: {self.args.model_name}\n")
             f.write("="*120 + "\n\n")
-            
-            # 컬럼 헤더 (Overall)
+
+            # Column headers (Overall)
             f.write("[Overall Metrics]\n")
             f.write("Split\tH@5\tN@5\tH@10\tN@10\tH@20\tN@20\n")
             f.write("-"*70 + "\n")
@@ -907,16 +907,16 @@ class RecommendationEvaluator:
         print(f"📊 Master log updated: {master_log_file}")
     
     def _save_csv_file(self, prompts, generated_texts, targets, histories, user_ids, rank_info, split):
-        """평가 결과를 CSV 파일로 저장"""
+        """Save evaluation results to a CSV file"""
         results_dir = Path("results")
         results_dir.mkdir(exist_ok=True)
-        
-        # 타임스탬프 추가
+
+        # Add timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         csv_filename = f"{self.args.run_name}_{split}_eval_{timestamp}.csv"
         csv_file = results_dir / csv_filename
-        
-        # DataFrame 생성
+
+        # Create DataFrame
         data = []
         for i in range(len(prompts)):
             rank = rank_info[i]['rank']
@@ -929,7 +929,7 @@ class RecommendationEvaluator:
                 'target_item_id': targets[i],
                 'prompt': prompts[i],
                 'generated_text': generated_texts[i],
-                'history_items': str(histories[i]),  # 리스트를 문자열로 변환
+                'history_items': str(histories[i]),  # Convert list to string
                 'target_score': rank_info[i]['target_score'],
                 'rank': rank,
                 'is_cold': is_cold,
@@ -944,12 +944,12 @@ class RecommendationEvaluator:
         
         df = pd.DataFrame(data)
         
-        # CSV 저장
+        # Save CSV
         df.to_csv(csv_file, index=False, encoding='utf-8-sig')
         
         print(f"💾 Detailed results saved to CSV: {csv_file}")
         
-        # 간단한 통계 출력
+        # Print brief statistics
         print(f"\n📈 CSV Statistics:")
         print(f"  Total samples: {len(df)}")
         print(f"  Cold items: {df['is_cold'].sum()}, Warm items: {(~df['is_cold']).sum()}")
@@ -961,13 +961,13 @@ class RecommendationEvaluator:
         print(f"  Mean target novelty: {df['target_novelty'].mean():.4f}")
     
     def cleanup(self):
-        """메모리 정리"""
+        """Clean up memory"""
         print("\n🧹 Cleaning up evaluator resources...")
-        
-        # vLLM 생성 모델 정리
+
+        # Clean up vLLM generation model
         if self.llm is not None:
             try:
-                # vLLM의 경우 llm_engine을 명시적으로 정리
+                # Explicitly clean up llm_engine for vLLM
                 if hasattr(self.llm, 'llm_engine'):
                     del self.llm.llm_engine
             except:
@@ -976,10 +976,10 @@ class RecommendationEvaluator:
             self.llm = None
             print("  ✓ Generation model cleaned up")
         
-        # 임베딩 모델 정리 (vLLM 또는 SentenceTransformer)
+        # Clean up embedding model (vLLM or SentenceTransformer)
         if self.emb_llm is not None:
             if not self.use_sentence_transformers:
-                # vLLM의 경우
+                # For vLLM
                 try:
                     if hasattr(self.emb_llm, 'llm_engine'):
                         del self.emb_llm.llm_engine
@@ -989,14 +989,14 @@ class RecommendationEvaluator:
             self.emb_llm = None
             print("  ✓ Embedding model cleaned up")
         
-        # 아이템 임베딩 정리
+        # Clean up item embeddings
         if self.item_embeddings is not None:
             self.item_embeddings = self.item_embeddings.cpu()
             del self.item_embeddings
             self.item_embeddings = None
             print("  ✓ Item embeddings cleaned up")
         
-        # 아이템 인기도 및 Novelty 정리
+        # Clean up item popularity and Novelty
         if self.item_popularity is not None:
             del self.item_popularity
             self.item_popularity = None
@@ -1017,7 +1017,7 @@ class RecommendationEvaluator:
                 self.hot_items is None, self.cold_items is None]):
             print("  ✓ Item popularity, novelty, and hot/cold sets cleaned up")
         
-        # GPU 메모리 강제 해제
+        # Force release GPU memory
         torch.cuda.empty_cache()
         gc.collect()
         

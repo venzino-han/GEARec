@@ -178,7 +178,7 @@ class LLMGenerator:
         return results
 
     def _generate_response_with_deep_infra(self, system_prompt, prompts):
-        # batch size 만큼 요청을 보내고 응답을 받아옴
+        # Send requests and receive responses in batch_size chunks
         responses = []
         token_nums = []
         for i in tqdm(range(0, len(prompts), self.args.batch_size)):

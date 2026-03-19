@@ -1,6 +1,6 @@
 """
-Pre-compute proxy labels for each item based on embedding similarities
-각 아이템별로 가장 유사한 상위 proxy_k개 아이템과 유사도를 계산하여 저장
+Pre-compute proxy labels for each item based on embedding similarities.
+Computes and stores the top proxy_k most similar items and their similarities per item.
 """
 
 import argparse
@@ -21,15 +21,15 @@ def precompute_item_similarities(
     seed: int = 42,
 ) -> Dict[int, List[Tuple[int, float]]]:
     """
-    모든 아이템 간 유사도를 사전 계산하여 각 아이템별로 가장 유사한 proxy_k개 아이템 저장
-    
+    Pre-compute pairwise similarities for all items and store the top proxy_k most similar items per item.
+
     Args:
-        item_embeddings: [num_items, emb_dim] 아이템 임베딩
-        proxy_k: 각 아이템별로 저장할 유사 아이템 개수
-        device: 계산에 사용할 디바이스
-        random_selection: True이면 threshold 이상의 아이템들 중 랜덤 선택
-        similarity_threshold: random_selection=True일 때 필터링할 최소 유사도
-        seed: 랜덤 시드
+        item_embeddings: [num_items, emb_dim] item embeddings
+        proxy_k: number of similar items to store per item
+        device: device to use for computation
+        random_selection: if True, randomly select from items above the threshold
+        similarity_threshold: minimum similarity threshold for filtering when random_selection=True
+        seed: random seed
         
     Returns:
         item_proxy_labels: Dict[item_id, List[Tuple[proxy_item_id, similarity]]]
@@ -39,12 +39,12 @@ def precompute_item_similarities(
     else:
         print(f"🔍 Computing item similarities for proxy labels (proxy_k={proxy_k}, top-k selection)...")
     
-    # 랜덤 시드 설정
+    # Set random seed
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     
-    # 아이템 임베딩 정규화 (코사인 유사도 계산을 위해)
+    # Normalize item embeddings (for cosine similarity computation)
     item_embeddings = item_embeddings.to(device)
     normalized_embeddings = torch.nn.functional.normalize(item_embeddings, p=2, dim=1)
     num_items = len(normalized_embeddings)
@@ -54,83 +54,83 @@ def precompute_item_similarities(
     
     item_proxy_labels = {}
     
-    # 배치 단위로 처리하여 메모리 효율성 개선
+    # Process in batches to improve memory efficiency
     batch_size = 1000
     random_order = torch.randperm(num_items, device=device)
     for start_idx in range(1, num_items+1, batch_size):
         end_idx = min(start_idx + batch_size, num_items)
         
-        # 현재 배치의 아이템들
+        # Current batch items
         batch_embs = normalized_embeddings[start_idx:end_idx]  # [batch_size, emb_dim]
-        
-        # 전체 아이템과의 유사도 계산
+
+        # Compute similarity with all items
         similarities = torch.mm(batch_embs, normalized_embeddings.T)  # [batch_size, num_items]
-        
-        # 각 아이템별로 저장
+
+        # Store per item
         for i, emb_idx in enumerate(range(start_idx, end_idx)):
-            # item_id는 embedding index와 동일 (0-based 또는 1-based 모두 지원)
+            # item_id is the same as embedding index (supports both 0-based and 1-based)
             item_id = emb_idx
-            
-            # 자기 자신 제거
+
+            # Remove self
             item_sims = similarities[i]  # [num_items]
-            item_sims[emb_idx] = -1.0  # 자기 자신은 제외
-            item_sims[0] = -1.0  # 첫 번째 아이템은 제외
-            
+            item_sims[emb_idx] = -1.0  # exclude self
+            item_sims[0] = -1.0  # exclude first item
+
             if random_selection:
-                # 랜덤 선택: 미리 정해진 랜덤 순서대로 순회하면서 threshold 이상만 샘플링
-                # 미리 랜덤 순열 생성 (자기 자신 제외)
-                # 자기 자신을 제거
+                # Random selection: iterate in pre-determined random order,
+                # sampling only items above the threshold
+                # Remove self from random order
                 random_order = random_order[random_order != emb_idx]
-                
-                # 랜덤 순서대로 아이템을 순회하면서 threshold 이상인 것만 선택
+
+                # Iterate in random order and select only items at or above threshold
                 selected_indices = []
                 selected_sims = []
-                
+
                 for idx in random_order:
                     idx_int = int(idx.item())
                     sim = item_sims[idx_int].item()
-                    
-                    # threshold 이상이면 선택
+
+                    # Select if sim >= threshold
                     if sim >= similarity_threshold:
                         selected_indices.append(idx_int)
                         selected_sims.append(sim)
-                        
-                        # proxy_k개가 채워지면 중단
+
+                        # Stop once proxy_k items are collected
                         if len(selected_indices) >= proxy_k:
                             break
-                
-                # 선택된 아이템이 있으면 정규화 및 저장
+
+                # Normalize and store if any items were selected
                 if len(selected_indices) == 0:
                     proxy_list = []
                 else:
                     selected_sims_tensor = torch.tensor(selected_sims, device=device)
-                    
-                    # 유사도 정규화 (최대값이 1.0이 되도록)
+
+                    # Normalize similarities (so max value becomes 1.0)
                     if selected_sims_tensor.max() > 0:
                         normalized_sims = selected_sims_tensor / selected_sims_tensor.max()
                     else:
                         normalized_sims = selected_sims_tensor
-                    
-                    # List[Tuple[item_id, similarity]] 형태로 저장
+
+                    # Store as List[Tuple[item_id, similarity]]
                     proxy_list = [
                         (selected_indices[j], float(normalized_sims[j].item()))
                         for j in range(len(selected_indices))
                     ]
             else:
-                # 기존 방식: 상위 proxy_k개 선택
+                # Original approach: select top proxy_k items
                 top_k_sims, top_k_indices = torch.topk(
-                    item_sims, 
-                    k=min(proxy_k, num_items - 1),  # 자기 자신 제외
+                    item_sims,
+                    k=min(proxy_k, num_items - 1),  # exclude self
                     dim=0
                 )
-                
-                # 유사도 정규화 (최대값이 1.0이 되도록)
+
+                # Normalize similarities (so max value becomes 1.0)
                 if top_k_sims.max() > 0:
                     normalized_sims = top_k_sims / top_k_sims.max()
                 else:
                     normalized_sims = top_k_sims
-                
-                # List[Tuple[item_id, similarity]] 형태로 저장
+
+                # Store as List[Tuple[item_id, similarity]]
                 proxy_list = [
                     (int(top_k_indices[j].item()), float(normalized_sims[j].item()))
                     for j in range(len(top_k_indices))
@@ -143,7 +143,7 @@ def precompute_item_similarities(
     
     print(f"✓ Completed item similarity computation for {len(item_proxy_labels)} items")
     
-    # 통계 정보 출력
+    # Print statistics
     if len(item_proxy_labels) > 0:
         proxy_counts = [len(proxies) for proxies in item_proxy_labels.values()]
         avg_proxy_count = sum(proxy_counts) / len(proxy_counts)
@@ -159,7 +159,7 @@ def precompute_item_similarities(
             items_with_less_than_k = sum(1 for count in proxy_counts if count < proxy_k)
             print(f"    Items with < {proxy_k} proxies: {items_with_less_than_k} ({100*items_with_less_than_k/len(proxy_counts):.1f}%)")
     
-    # 예시 출력
+    # Print example
     if len(item_proxy_labels) > 0:
         sample_item = list(item_proxy_labels.keys())[0]
         proxy_list = item_proxy_labels[sample_item]
@@ -188,10 +188,10 @@ def main():
     
     args = parser.parse_args()
     
-    # 임베딩 모델 이름에서 마지막 부분 추출
+    # Extract last part of embedding model name
     emb_model_name_dir = args.emb_model_name.split("/")[-1]
-    
-    # 아이템 임베딩 파일 경로
+
+    # Item embedding file path
     item_embedding_file = f"data_emb/{args.data_name}_{args.emb_type}_{emb_model_name_dir}_emb.pt"
     
     print(f"📦 Loading item embeddings from: {item_embedding_file}")
@@ -201,7 +201,7 @@ def main():
     item_embeddings = torch.load(item_embedding_file, map_location=args.device)
     print(f"✓ Loaded embeddings for {len(item_embeddings)} items")
     
-    # 아이템 간 유사도 계산
+    # Compute inter-item similarities
     item_proxy_labels = precompute_item_similarities(
         item_embeddings=item_embeddings,
         proxy_k=args.proxy_k,
@@ -211,11 +211,11 @@ def main():
         seed=args.seed,
     )
     
-    # 출력 파일 경로
+    # Output file path
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 파일명에 random_selection 정보 포함
+
+    # Include random_selection information in the filename
     if args.random_selection:
         output_file = output_dir / f"{args.data_name}_proxy_labels_k{args.proxy_k}_random_th{args.similarity_threshold}_{args.emb_type}_{emb_model_name_dir}.json"
     else:
@@ -223,8 +223,8 @@ def main():
     
     print(f"\n💾 Saving proxy labels to: {output_file}")
     
-    # JSON 형태로 저장
-    # key는 string으로 변환 (JSON은 integer key를 지원하지 않음)
+    # Save as JSON
+    # Convert keys to string (JSON does not support integer keys)
     item_proxy_labels_str_keys = {
         str(item_id): proxy_list 
         for item_id, proxy_list in item_proxy_labels.items()
@@ -235,7 +235,7 @@ def main():
     
     print(f"✓ Saved proxy labels for {len(item_proxy_labels)} items")
     
-    # 파일 크기 출력
+    # Print file size
     file_size_mb = output_file.stat().st_size / (1024 * 1024)
     print(f"  File size: {file_size_mb:.2f} MB")
     
