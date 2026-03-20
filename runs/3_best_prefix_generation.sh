@@ -17,8 +17,11 @@
 DEVICE=0
 MODEL_NAME="google/gemma-3-1b-it"
 MODEL_DIR="gemma-3-1b-it"
+EMB_TYPE="item_preference_1024_gemma-3-4b-it"
+EMB_MODEL="mixedbread-ai/mxbai-embed-large-v1"
+
 SPLITS=(train valid)
-DATASETS=(beauty sports toys yelp)
+DATASETS=(beauty sports toys)
 N_SAMPLES=8         # number of diverse trajectories to sample per user
 TEMPERATURE=1.0     # high temperature to encourage diverse phrasings
 
@@ -37,25 +40,23 @@ for split in "${SPLITS[@]}"; do
         --data_name   "$dataset" \
         --split       "$split" \
         --model_name  "$MODEL_NAME" \
-        --history_limit 8 \
-        --word_limit  256 \
-        --days        365 \
         --temperature $TEMPERATURE \
-        --max_output_tokens 512 \
-        --batch_size  32 \
         --gpu_memory_utilization 0.95 \
-        --ranked_csv  "$RANKED_CSV" \   # source of best-anchor selection per user
-        --n_samples   $N_SAMPLES        # generate 8 samples per user
+        --ranked_csv  "$RANKED_CSV" \
+        --n_samples   $N_SAMPLES
 
     echo "✓ Done: ${dataset} / ${split}  (${N_SAMPLES} samples)"
     echo "──────────────────────────────────────────────────────"
 
+    CSV="data_processed/${dataset}_${MODEL_DIR}_${SPLIT}_key_selection_best_from_${dataset}_${MODEL_DIR}_${SPLIT}_key_selection_prefix_ranked.csv"
+    [ ! -f "$CSV" ] && echo "⚠️  Skip (not found): $CSV" && continue
+    CUDA_VISIBLE_DEVICES=$DEVICE python3 src/eval_key_selection.py \
+        --input_csv "$CSV" \
+        --data_name "$dataset" \
+        --split "$SPLIT" \
+        --emb_type "$EMB_TYPE" \
+        --emb_model_name "$EMB_MODEL" \
+        --use_sentence_transformers
 done
 done
 
-echo ""
-echo "All datasets and splits complete."
-echo ""
-echo "Generated files:"
-ls -lh data_processed/*_best_from_*.csv 2>/dev/null \
-    || echo "  (no output files found)"

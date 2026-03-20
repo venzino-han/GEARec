@@ -58,10 +58,6 @@ download_file() {
   echo "Saved: ${out_path}"
 }
 
-# File IDs from:
-# toys.zip   -> https://drive.google.com/file/d/14yHjyJSyzZRy7z-uzjHmukMh3-0LpATY/view?usp=sharing
-# sports.zip -> https://drive.google.com/file/d/1v6EUEZAou_AIM0rk1JrJdBKXjSOmqxoM/view?usp=sharing
-# beauty.zip -> https://drive.google.com/file/d/1-Q7wMpxVGeZxo3TwW-eCd63Wi6APEiZz/view?usp=sharing
 download_file "14yHjyJSyzZRy7z-uzjHmukMh3-0LpATY" "toys.zip"
 download_file "1v6EUEZAou_AIM0rk1JrJdBKXjSOmqxoM" "sports.zip"
 download_file "1-Q7wMpxVGeZxo3TwW-eCd63Wi6APEiZz" "beauty.zip"

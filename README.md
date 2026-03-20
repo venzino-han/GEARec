@@ -106,126 +106,96 @@ During inference, GEARec operates as a **single-pass retrieval pipeline**:
 This enables recommendation without external anchor search or multi-stage online generation.
 
 
-GEARec consists of three stages.
-
-### 1. Key Item Extraction
-
-Given a user history, the LLM is prompted to:
-
-- Identify the **single key item** from the history that most strongly motivates the next purchase.
-- Generate a detailed, paragraph-length **intent query** (3–5 sentences) explaining why that item influenced the user, what attributes they value, and how this leads to the next purchase.
-
-The output follows a structured tag format:
-
-```
-<key_item>[Key Item Name]</key_item>
-<query>[A detailed paragraph describing the user's preferences and future intent]</query>
-```
-
-To find the best anchor, GEARec runs key item extraction in **item-prefix mode**: for each user, it generates one prompt per history item (appending that item as the forced anchor) and collects N candidate trajectories. This corresponds to `--item_prefix` in `src/generate_key_selection.py`.
-
----
-
-### 2. Reachability Evaluation
-
-Not every generated query is useful for retrieval. GEARec evaluates each trajectory by:
-
-- Encoding `key_item title + query text` with a dense text encoder (e.g., `mixedbread-ai/mxbai-embed-large-v1`).
-- Computing the **retrieval rank** of the ground-truth target item against the full item pool.
-- Saving the rank score per trajectory in a ranked CSV.
-
-This step is handled by `src/eval_key_selection.py`.
-
----
-
-### 3. Best-of-N Sampling and SFT
-
-Using the ranked CSV:
-
-1. **Best-of-N generation** (`src/generate_key_selection.py --ranked_csv`): For each user, the history item with the lowest (best) rank is selected as the anchor. The LLM then generates N samples (e.g., N=8) with temperature > 0 to produce diverse trajectories.
-2. **Reachability re-evaluation** (`src/eval_key_selection.py`): The best-of-N samples are ranked again to identify which trajectories can retrieve the target.
-3. **SFT on reachable trajectories** (`src/train_sft.py`): Only samples whose rank is within `--max_rank_threshold` (e.g., top-100) are retained for supervised fine-tuning using TRL's `SFTTrainer`.
-
----
-
 ## Running the Pipeline
 
-The pipeline follows four main stages. All scripts are in `runs/`.
+The pipeline follows seven stages. All scripts are in `runs/`.
 
-### Stage 1 — Key Item Extraction
-
-**1a. Basic (test split, no forced anchor)**
+### Stage 0 — Dataset Download
 
 ```bash
-bash runs/1_key_selection_basic.sh
+bash runs/0_download_datasets.sh
 ```
 
-Runs `src/generate_key_selection.py` over the test split for all four datasets.  
-Outputs: `data_processed/{dataset}_gemma-3-1b-it_test_key_selection.csv`
-
-**1b. Item-prefix mode (train/valid splits)**
-
-```bash
-bash runs/2_key_selection_prefix_titles.sh
-```
-
-For each user, generates one prompt per history item (N-item history → N prompts).  
-Uses `--item_prefix` flag. Outputs: `data_processed/{dataset}_gemma-3-1b-it_{split}_key_selection_prefix.csv`
-
-**1c. Preselected anchor (test split)**
-
-```bash
-bash runs/3_key_selection_preselected.sh
-```
-
-Reads an externally provided anchor CSV and injects it via `--preselected_csv`.
+Downloads the raw dataset archives (toys, sports, beauty) from Google Drive into `./data/`.  
+Requires either `gdown` (preferred) or `curl`.
 
 ---
 
-### Stage 2 — Reachability Evaluation
+### Stage 1 — CF Anchor Evaluation
 
 ```bash
-bash runs/4_eval_key_selection_all.sh
+bash runs/1_eval_cf_key_selection_all.sh
 ```
 
-Encodes each `(key_item, query)` pair with `mixedbread-ai/mxbai-embed-large-v1`, computes retrieval rank against the full item pool, and saves the rank column.  
-Outputs: `data_processed/{dataset}_gemma-3-1b-it_{split}_key_selection_prefix_ranked.csv`
+Evaluates the collaborative filtering (CF) anchor quality for train/valid splits using pre-computed SASRec trigger items. Computes retrieval ranks for each CF anchor against the full item pool.
 
-Key settings:
-- `--emb_type item_preference_1024_gemma-3-4b-it`
-- `--emb_model_name mixedbread-ai/mxbai-embed-large-v1`
+Input: `data_processed/{dataset}_gemma-3-1b-it_{split}_key_selection_retrieval_rank_top100_from_SASRec_{dataset}_{split}_trigger_items.csv`  
+Output: ranked CSVs (`..._gt_based_ranked.csv`) used as CF augmentation data in Stage 4.
 
 ---
 
-### Stage 3 — Best-of-N Sampling and Re-evaluation
-
-**3a. Best-of-N generation**
+### Stage 2 — Key Item Extraction + Reachability Evaluation
 
 ```bash
-bash runs/5_best_postfix_sample8.sh
+bash runs/2_key_selection_prefix.sh
 ```
 
-Selects the best anchor per user from the ranked CSV and samples N=8 trajectories at temperature=1.0.  
-Outputs: `data_processed/{dataset}_gemma-3-1b-it_{split}_key_selection_best_from_*_ranked.csv`
+For each user, appends every history item as a forced prefix anchor (one prompt per history item) and generates N candidate reasoning trajectories via `--item_prefix`. Then immediately evaluates each trajectory with a dense text encoder to assign retrieval ranks.  
+Runs over train/valid splits for beauty, sports, toys.
 
-**3b. Re-evaluate best-of-N**
-
-```bash
-bash runs/6_eval_postfix_all.sh
-```
-
-Evaluates the best-of-N outputs and assigns retrieval ranks.  
-Outputs: `data_processed/{dataset}_..._ranked_ranked.csv`
+Outputs:
+- Generated: `data_processed/{dataset}_gemma-3-1b-it_{split}_key_selection_prefix.csv`
+- Ranked: `data_processed/{dataset}_gemma-3-1b-it_{split}_key_selection_prefix_ranked.csv`
 
 ---
 
-### Stage 4 — SFT Training
+### Stage 3 — Best-of-N Generation + Re-evaluation
 
 ```bash
-bash runs/7_sft_key_selection.sh
+bash runs/3_best_prefix_generation.sh
 ```
 
-Fine-tunes `google/gemma-3-1b-it` using TRL `SFTTrainer` on selected samples.
+Reads the ranked CSV from Stage 2, selects the best anchor per user (history item with the lowest retrieval rank), then samples N=8 diverse trajectories at temperature=1.0 via `--ranked_csv`. Re-evaluates the generated outputs to assign final retrieval ranks.
+
+Input: `data_processed/{dataset}_gemma-3-1b-it_{split}_key_selection_prefix_ranked.csv`  
+Output: `data_processed/{dataset}_gemma-3-1b-it_{split}_key_selection_best_from_*_ranked.csv`
+
+---
+
+### Stage 4 — SFT Training (CF-Augmented)
+
+```bash
+bash runs/4_sft_key_selection.sh
+```
+
+Fine-tunes `google/gemma-3-1b-it` using **Dynamic Fine-Tuning (DFT)** on curated trajectories. Applies a two-source routing strategy:
+- If a user's best trajectory rank ≤ 20 (main threshold), it is used directly for training.
+- Otherwise, the CF-guided trajectory (from Stage 1) is substituted as a fallback, provided its rank ≤ 100.
+  
+Checkpoints: `checkpoints/sft_keysel_gt_guided_{dataset}_seed42_main20_gt100_days365_steps3000_dft/`
+
+---
+
+### Stage 5 — Embedding Extraction
+
+```bash
+bash runs/5_embedding_extraction.sh
+```
+
+Encodes the SFT model's generated reasoning trajectories using `mixedbread-ai/mxbai-embed-large-v1` for all splits (train/val/test) across all datasets. Uses `src/extract_user_emb.py` with `--prepend_last_item_meta`.
+
+Output: `data_emb/sft_keysel_main20_cf_guided_user_emb_{dataset}_{split}.pt`
+
+---
+
+### Stage 6 — Projection Layer Training
+
+```bash
+bash runs/6_projection_layer_training.sh
+```
+
+Trains a lightweight projection layer that maps semantic user embeddings (from Stage 5) into the collaborative latent space using a contrastive objective against pre-computed CF item embeddings. Implements **Semantic-to-Collaborative Alignment** via `src/train_embedding.py`.
+
 
 ---
 
