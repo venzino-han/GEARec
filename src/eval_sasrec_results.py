@@ -316,7 +316,7 @@ def main() -> None:
 
     preds = None
     ranks = None
-    if pred_path.suffix.lower() == ".csv":
+    if pred_path.prefix.lower() == ".csv":
         ranks = _load_rank_predictions_from_csv(pred_path)
     else:
         preds = _normalize_predictions(_load_json(pred_path))
@@ -343,7 +343,7 @@ def main() -> None:
     if args.output_path:
         output_path = Path(args.output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        if output_path.suffix == ".log":
+        if output_path.prefix == ".log":
             with output_path.open("w") as f:
                 f.write(log_text)
         else:

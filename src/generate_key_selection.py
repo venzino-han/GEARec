@@ -189,8 +189,8 @@ def process_key_selection(args):
 
     # ranked_csv / retrieval_rank_csv / preselected_csv are mutually exclusive
     # Priority: retrieval_rank_csv > ranked_csv > preselected_csv
-    use_suffix = (
-        args.item_suffix
+    use_prefix = (
+        args.item_prefix
         or bool(args.preselected_csv)
         or bool(args.ranked_csv)
         or bool(args.retrieval_rank_csv)
@@ -198,23 +198,23 @@ def process_key_selection(args):
     use_target_guided = getattr(args, "target_guided", False)
 
     # Output filename
-    suffix = ""
-    if args.item_suffix:
-        suffix += "_suffix"
+    prefix = ""
+    if args.item_prefix:
+        prefix += "_prefix"
     if args.retrieval_rank_csv:
         csv_stem = os.path.splitext(os.path.basename(args.retrieval_rank_csv))[0]
-        suffix += f"_retrieval_rank_top{args.retrieval_rank_threshold}_from_{csv_stem}"
+        prefix += f"_retrieval_rank_top{args.retrieval_rank_threshold}_from_{csv_stem}"
     elif args.ranked_csv:
         csv_stem = os.path.splitext(os.path.basename(args.ranked_csv))[0]
-        suffix += f"_best_from_{csv_stem}"
+        prefix += f"_best_from_{csv_stem}"
     elif args.preselected_csv:
         csv_stem = os.path.splitext(os.path.basename(args.preselected_csv))[0]
-        suffix += f"_from_{csv_stem}"
+        prefix += f"_from_{csv_stem}"
     if use_target_guided:
-        suffix += "_target_guided"
+        prefix += "_target_guided"
     output_file = (
         f"data_processed/{data_name}_{model_dir_name}_{args.split}"
-        f"_key_selection{suffix}.csv"
+        f"_key_selection{prefix}.csv"
     )
     print(f"Output: {output_file}")
 
@@ -238,7 +238,7 @@ def process_key_selection(args):
         preselected_map = load_preselected_items(args.preselected_csv)
 
     # Tokenizer: apply chat template directly in postfix mode or target_guided mode
-    need_tokenizer = use_suffix or use_target_guided
+    need_tokenizer = use_prefix or use_target_guided
     tokenizer = None
     if need_tokenizer:
         tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -293,7 +293,7 @@ def process_key_selection(args):
             user_ids.append(user_id)
             target_item_ids.append(target_item_id)
             postfix_item_ids.append(None)
-        elif use_suffix:
+        elif use_prefix:
             # Apply chat template → append item title postfix at end of string
             chat_str = apply_chat_template(tokenizer, history_text)
 
@@ -309,7 +309,7 @@ def process_key_selection(args):
                 target_item_ids.append(target_item_id)
                 postfix_item_ids.append(presel_id)
             else:
-                # --item_suffix: N history items → N prompts
+                # --item_prefix: N history items → N prompts
                 for item_id in history_item_ids:
                     title = get_item_title(item_metadata, item_id)
                     prompts.append(chat_str + f"<key_item>{title}</key_item>")
@@ -331,8 +331,8 @@ def process_key_selection(args):
         print(f"[index {i}]\n{prompts[i]}\n{'-'*60}")
 
     # postfix mode: compare base (chat template only) vs final (+postfix)
-    if use_suffix and prompts:
-        print("\n--- item_suffix example ---")
+    if use_prefix and prompts:
+        print("\n--- item_prefix example ---")
         i = sample_idx[0]
         uid = user_ids[i]
         h_ids = [int(r["item_id"])
@@ -365,7 +365,7 @@ def process_key_selection(args):
     llm_generator = LLMGenerator(args)
     responses, token_nums = llm_generator.generate_response(
         KEY_SELECTION_SYSTEM_PROMPT, prompts,
-        raw_prompt=(use_suffix or use_target_guided),
+        raw_prompt=(use_prefix or use_target_guided),
         n_samples=n_samples,
     )
 
@@ -432,13 +432,13 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str,   default="google/gemma-3-1b-it")
     parser.add_argument("--temperature",            type=float, default=0.01)
     parser.add_argument("--max_input_tokens",       type=int,   default=1024 * 6)
-    parser.add_argument("--max_output_tokens",      type=int,   default=256)
-    parser.add_argument("--word_limit",             type=int,   default=128)
+    parser.add_argument("--max_output_tokens",      type=int,   default=512)
+    parser.add_argument("--word_limit",             type=int,   default=256)
     parser.add_argument("--history_limit",          type=int,   default=8)
     parser.add_argument("--dtype",      type=str,   default="bfloat16")
     parser.add_argument("--days",       type=int,   default=365)
     parser.add_argument("--use_reviews",            action="store_true")
-    parser.add_argument("--batch_size",             type=int,   default=8)
+    parser.add_argument("--batch_size",             type=int,   default=32)
     parser.add_argument("--use_deep_infra",         action="store_true")
     parser.add_argument("--split",  type=str,   default="test",
                         choices=["train", "valid", "test"])
@@ -455,7 +455,7 @@ if __name__ == "__main__":
         help="Number of samples to generate per prompt (vLLM SamplingParams n). Results saved to a single CSV."
     )
     parser.add_argument(
-        "--item_suffix", action="store_true",
+        "--item_prefix", action="store_true",
         help=(
             "After applying the chat template, append history item titles as postfix. "
             "N history items → N prompts per user."
@@ -473,7 +473,7 @@ if __name__ == "__main__":
         help=(
             "Path to the ranked CSV generated by eval_key_selection.py "
             "(requires user_id, postfix_item_id, rank columns). "
-            "Automatically selects the postfix_item_id with the lowest rank per user as suffix."
+            "Automatically selects the postfix_item_id with the lowest rank per user as prefix."
         ),
     )
     parser.add_argument(

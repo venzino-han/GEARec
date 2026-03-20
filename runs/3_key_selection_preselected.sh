@@ -1,6 +1,12 @@
 #!/bin/bash
-# Generate by appending selected_item_id from external CSV as postfix after chat template
-# 1 prompt per user
+# =============================================================================
+# Stage 2 — Key Item Extraction (Preselected Anchor)
+# =============================================================================
+# Reads a preselected anchor CSV (typically the output of Stage 1a) and
+# re-runs generation with that fixed anchor injected via --preselected_csv.
+# Produces exactly 1 prompt per user (anchor is already determined).
+# Useful for ablations or re-generating queries from a known anchor set.
+# =============================================================================
 
 DEVICE=0
 MODEL_NAME="google/gemma-3-1b-it"
@@ -19,13 +25,6 @@ for dataset in "${DATASETS[@]}"; do
         --data_name "$dataset" \
         --split "$SPLIT" \
         --model_name "$MODEL_NAME" \
-        --history_limit 8 \
-        --word_limit 128 \
-        --days 365 \
-        --temperature 0.01 \
-        --max_output_tokens 256 \
-        --batch_size 16 \
-        --gpu_memory_utilization 0.95 \
-        --preselected_csv "$CSV"
+        --preselected_csv "$CSV"    # inject pre-determined anchor from the CSV
     echo "✓ Done: ${dataset}"
 done

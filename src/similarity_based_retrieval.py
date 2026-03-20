@@ -392,17 +392,17 @@ def main():
     # Determine method prefix for filenames
     method_prefix = "last_item_retrieval" if args.use_last_item else args.run_name
     
-    # Add day filter suffix if specified
-    day_suffix = f"_day{args.day_filters}" if args.day_filters != -1 else ""
+    # Add day filter prefix if specified
+    day_prefix = f"_day{args.day_filters}" if args.day_filters != -1 else ""
     
     # Save detailed results
-    csv_filename = f"{method_prefix}_{args.data_name}_{args.eval_split}{day_suffix}.csv"
+    csv_filename = f"{method_prefix}_{args.data_name}_{args.eval_split}{day_prefix}.csv"
     csv_path = os.path.join(args.output_dir, csv_filename)
     results_df.to_csv(csv_path, index=False)
     print(f"\n💾 Saved detailed results to: {csv_path}")
     
     # Save metrics
-    metrics_filename = f"{method_prefix}_{args.data_name}_{args.eval_split}{day_suffix}_metrics_{timestamp}.json"
+    metrics_filename = f"{method_prefix}_{args.data_name}_{args.eval_split}{day_prefix}_metrics_{timestamp}.json"
     metrics_path = os.path.join(args.output_dir, metrics_filename)
     with open(metrics_path, 'w') as f:
         json.dump(metrics, f, indent=2)

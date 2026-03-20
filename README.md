@@ -1,21 +1,18 @@
 # GEARec: Grounded Extraction for Anchor-based Recommendation
 
-Official implementation of **GEARec**, a grounded supervision framework for LLM-based sequential recommendation.
+Official implementation of **GEARec**, a grounded data-curation and alignment framework for **LLM-based sequential recommendation**.
 
-GEARec is designed for a practical recommendation setting where a user's interaction history is long, noisy, and only weakly connected to the final target item. Instead of asking an LLM to explain the entire history at once, GEARec first extracts a **high-relevance anchor item** (key item) and then builds **focused reasoning trajectories** around that anchor. This makes the training signal more stable and the final retrieval query more aligned with user behavior.
+GEARec is designed for practical recommendation settings where a user's interaction history is long, noisy, and only partially connected to the final target item. Instead of asking an LLM to explain the entire history at once, GEARec first identifies a **high-relevance anchor item** from the history and then constructs **grounded reasoning trajectories** around that anchor. This yields more focused supervision and better alignment between generated reasoning and actual retrieval outcomes.
 
 ---
 
 ## Abstract
 
-Large Language Models (LLMs) in sequential recommendation often struggle to use long user histories effectively. They tend to overuse irrelevant context and generate reasoning that sounds plausible but does not actually help retrieve the target item. This becomes especially problematic in large candidate pools, where reinforcement learning or free-form exploration rarely produces successful trajectories.
+Large Language Models (LLMs) in sequential recommendation often struggle to use long interaction histories effectively. They tend to overuse noisy context when constructing explanations and retrieval trajectories, which leads to diffuse reasoning and makes autonomous exploration methods such as reinforcement learning or rejection sampling less effective in massive item pools.
 
-GEARec addresses this issue with two key ideas:
+GEARec addresses this issue through **Dual-Perspective Anchor Extraction** and **Hybrid Reasoning Generation**. By combining the semantic strengths of LLMs with collaborative filtering (CF) signals, GEARec identifies a high-relevance anchor item from the user's history and uses it to build more focused reasoning trajectories. It then applies **Reachability-Aware Trajectory Routing** to retain only trajectories that are actually useful for retrieval, and uses these curated trajectories for downstream alignment.
 
-1. **Anchor-Grounded Key Item Extraction**: identify a single key item from user history that most strongly motivates the next purchase, and generate a focused intent paragraph anchored to that item.
-2. **Reachability-Aware Trajectory Filtering**: keep only reasoning trajectories whose generated query can actually retrieve the target item within a strict top-K rank threshold.
-
-The resulting dataset is used to fine-tune an LLM. Inference is performed in a **single pass**: the model reads the user history, identifies the key item, generates an anchor-grounded intent query, and retrieves items efficiently via dense embedding search.
+At inference time, GEARec operates in a **single pass**: the model reads the user history, autonomously identifies the anchor item, generates a grounded reasoning trajectory, and retrieves items efficiently via dense embedding search.
 
 ---
 
@@ -23,27 +20,91 @@ The resulting dataset is used to fine-tune an LLM. Inference is performed in a *
 
 ### Why existing methods fail
 
-Existing LLM-based recommendation pipelines often suffer from **context-utilization bias**. The model tries to connect too many past interactions, including noisy or weakly relevant ones, which leads to spurious reasoning and sparse successful trajectories.
+Existing LLM-based recommendation pipelines often suffer from **context-utilization bias**. The model tends to forcefully connect too many past interactions, including weakly relevant or noisy ones, which leads to spurious reasoning and sparse successful trajectories.
 
-<!-- <p align="center">
-  <img src="./figs/motiv.png" alt="Existing methods fail due to context-utilization bias and reward sparsity (left), whereas our framework discovers a valid reasoning path guided by a high-relevance anchor (right)." width="700"/>
-</p> -->
 ![Existing methods fail due to context-utilization bias and reward sparsity (left), whereas our framework discovers a valid reasoning path guided by a high-relevance anchor (right).](./figs/motiv.png)
-
 
 ### What GEARec does differently
 
-GEARec identifies a **single decisive key item** from the interaction history, uses that item to generate a focused intent query, and filters out trajectories that are not actually retrievable.
+GEARec identifies a **single high-relevance anchor item**, constructs reasoning trajectories from both the **semantic view** and the **collaborative view**, and then routes only **reachable** trajectories into the final training set.
 
-<!-- <p align="center">
-  <img src="./figs/method.png" alt="Overview of the proposed framework, GEARec." width="900"/>
-</p> -->
 ![Overview of the proposed framework, GEARec.](./figs/method.png)
-
 
 ---
 
 ## Method
+
+GEARec consists of three phases:
+
+1. **Dual-Perspective Anchor Extraction and Reasoning Generation**
+2. **Reachability-Aware Trajectory Routing**
+3. **Alignment via Curated Trajectories**
+
+### 1. Dual-Perspective Anchor Extraction and Reasoning Generation
+
+To reduce context overuse, GEARec extracts a single **high-relevance anchor item** from the user history and builds reasoning around it. The framework uses two complementary perspectives:
+
+#### 1.1 LLM Reasoning (without GT)
+
+The LLM first identifies a semantic anchor from the user history without access to the target item.
+
+To do this, GEARec uses a **prefix-enforcement strategy**: each history item is treated as an anchor candidate, and the LLM is forced to begin its response from that candidate item. This produces multiple candidate reasoning trajectories, each grounded on a different historical item.
+
+Among these candidates, the one whose generated trajectory achieves the best retrieval rank for the hidden target item is selected as the **LLM anchor**. Then, a **Best-of-N** sampling procedure is applied to generate multiple diverse reasoning trajectories conditioned on that anchor, and the best one is retained as the final **LLM reasoning trajectory**.
+
+#### 1.2 CF Reasoning (with GT guidance)
+
+Because semantic reasoning alone may fail to capture non-intuitive global consumption patterns, GEARec also introduces a **collaborative filtering (CF) anchor**.
+
+Using pre-trained CF item embeddings, the framework selects the history item that is most similar to the target item in the collaborative latent space. The LLM is then prompted with both the **CF anchor** and the **target item** to verbalize their relationship and generate a **CF-guided reasoning trajectory**.
+
+This step translates collaborative knowledge into natural-language supervision.
+
+---
+
+### 2. Reachability-Aware Trajectory Routing
+
+Not every generated trajectory is useful for retrieval. Some trajectories may sound plausible but still fail to retrieve the target item from a large candidate pool.
+
+To address this, GEARec evaluates each generated trajectory using a frozen dense text encoder and a retrieval backend:
+
+- If the **LLM reasoning trajectory** successfully retrieves the target item within a predefined **Top-K** threshold, it is selected.
+- Otherwise, the framework checks whether the **CF anchor** itself has sufficient collaborative relevance to the target item under a stricter **Top-M** criterion.
+- If so, the **CF reasoning trajectory** is used instead.
+- If neither condition is satisfied, the instance is discarded.
+
+This routing process ensures that the final training data contains only **grounded and reachable reasoning trajectories**.
+
+---
+
+### 3. Alignment via Curated Trajectories
+
+The curated dataset is then used for alignment in two steps:
+
+#### 3.1 Dynamic Fine-Tuning (DFT)
+
+Rather than relying only on standard teacher-forcing SFT, GEARec adopts **Dynamic Fine-Tuning (DFT)** to stabilize optimization and improve generalization. DFT reweights token-level updates based on inverse policy probability, allowing the LLM to adapt more smoothly to the recommendation domain.
+
+#### 3.2 Semantic-to-Collaborative Alignment
+
+The generated reasoning trajectory is encoded with a frozen dense text encoder and projected into the collaborative retrieval space. Item representations are projected into the same latent space, and the model is optimized using a contrastive objective so that the reasoning-derived user query embedding aligns with the target item embedding.
+
+This step ensures that the generated text is not only coherent, but also directly useful for large-scale retrieval.
+
+---
+
+## Inference
+
+During inference, GEARec operates as a **single-pass retrieval pipeline**:
+
+1. The fine-tuned LLM receives the user history.
+2. It autonomously identifies the anchor item and generates a grounded reasoning trajectory.
+3. The generated text is encoded by a frozen text encoder.
+4. A learned projection layer maps the encoded trajectory into the collaborative latent space.
+5. Retrieval is performed by similarity search against projected item embeddings.
+
+This enables recommendation without external anchor search or multi-stage online generation.
+
 
 GEARec consists of three stages.
 
@@ -61,7 +122,7 @@ The output follows a structured tag format:
 <query>[A detailed paragraph describing the user's preferences and future intent]</query>
 ```
 
-To find the best anchor, GEARec runs key item extraction in **item-suffix mode**: for each user, it generates one prompt per history item (appending that item as the forced anchor) and collects N candidate trajectories. This corresponds to `--item_suffix` in `src/generate_key_selection.py`.
+To find the best anchor, GEARec runs key item extraction in **item-prefix mode**: for each user, it generates one prompt per history item (appending that item as the forced anchor) and collects N candidate trajectories. This corresponds to `--item_prefix` in `src/generate_key_selection.py`.
 
 ---
 
@@ -102,14 +163,14 @@ bash runs/1_key_selection_basic.sh
 Runs `src/generate_key_selection.py` over the test split for all four datasets.  
 Outputs: `data_processed/{dataset}_gemma-3-1b-it_test_key_selection.csv`
 
-**1b. Item-suffix mode (train/valid splits)**
+**1b. Item-prefix mode (train/valid splits)**
 
 ```bash
-bash runs/2_key_selection_suffix_titles.sh
+bash runs/2_key_selection_prefix_titles.sh
 ```
 
 For each user, generates one prompt per history item (N-item history → N prompts).  
-Uses `--item_suffix` flag. Outputs: `data_processed/{dataset}_gemma-3-1b-it_{split}_key_selection_suffix.csv`
+Uses `--item_prefix` flag. Outputs: `data_processed/{dataset}_gemma-3-1b-it_{split}_key_selection_prefix.csv`
 
 **1c. Preselected anchor (test split)**
 
@@ -128,7 +189,7 @@ bash runs/4_eval_key_selection_all.sh
 ```
 
 Encodes each `(key_item, query)` pair with `mixedbread-ai/mxbai-embed-large-v1`, computes retrieval rank against the full item pool, and saves the rank column.  
-Outputs: `data_processed/{dataset}_gemma-3-1b-it_{split}_key_selection_suffix_ranked.csv`
+Outputs: `data_processed/{dataset}_gemma-3-1b-it_{split}_key_selection_prefix_ranked.csv`
 
 Key settings:
 - `--emb_type item_preference_1024_gemma-3-4b-it`
@@ -164,21 +225,7 @@ Outputs: `data_processed/{dataset}_..._ranked_ranked.csv`
 bash runs/7_sft_key_selection.sh
 ```
 
-Fine-tunes `google/gemma-3-1b-it` using TRL `SFTTrainer` on samples with rank ≤ 100.
-
-Key settings:
-
-| Parameter | Value |
-|---|---|
-| `--max_rank_threshold` | 100 |
-| `--max_steps` | 3000 |
-| `--learning_rate` | 1e-7 |
-| `--batch_size` | 2 |
-| `--prompt_type` | `key_selection` |
-| `--target_type` | `key_selection` |
-| `--emb_model_name` | `mixedbread-ai/mxbai-embed-large-v1` |
-
-Checkpoints are saved to `checkpoints/sft_keysel_{dataset}_seed{seed}_rank{threshold}_steps{max_steps}/`.
+Fine-tunes `google/gemma-3-1b-it` using TRL `SFTTrainer` on selected samples.
 
 ---
 
@@ -194,14 +241,12 @@ This suggests a strong intent to explore complementary wireless audio products .
 </query>
 ```
 
-The `<query>` text is encoded for retrieval at inference time.
-
 ---
 
 ## Key Design Choices
 
 - **Anchor before reasoning**: prevents the LLM from over-explaining the full user history.
-- **Item-suffix forcing**: systematically tests every history item as a potential anchor to find the most retrievable one.
+- **Item-prefix forcing**: systematically tests every history item as a potential anchor to find the most retrievable one.
 - **Reachability filtering**: keeps only reasoning that leads to actual retrieval success (rank ≤ threshold).
 - **Best-of-N at high temperature**: explores diverse phrasings anchored to the best item before SFT filtering.
 - **Single-pass inference**: at test time, only one forward pass through the LLM is needed.
@@ -212,14 +257,3 @@ The `<query>` text is encoded for retrieval at inference time.
 
 GEARec is intended for researchers who want to study how LLM reasoning can be made more grounded, retrieval-aware, and practically useful in recommendation systems. The main hypothesis is that recommendation quality improves when supervision is built from **reachable anchor-grounded reasoning trajectories** rather than unconstrained free-form explanations.
 
----
-
-## Citation
-
-```bibtex
-@article{anonymous2026gearec,
-  title   = {Illuminating the Path: Grounded Extraction for Anchor-based Recommendation},
-  author  = {Anonymous ACL Submission},
-  year    = {2026}
-}
-```
